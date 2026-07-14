@@ -1,0 +1,16 @@
+[project]
+name = "applenotes-mcp"
+version = "0.1.0"
+description = "Apple Notes MCP server with real rich-text formatting via Shortcuts"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]>=1.28.1",
+]
+
+[project.scripts]
+applenotes-mcp = "applenotes_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
