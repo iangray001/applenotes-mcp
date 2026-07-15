@@ -104,9 +104,17 @@ The note is re-filed in its original folder afterwards. That folder has to be re
 NoteStore too: AppleScript's `container of note id X` fails with error -1728 in current
 Notes, however the note is addressed.
 
-**Heading depth is flattened on write.** Apple's markdown converter maps `##` to Notes'
-*Title* style, so `## Foo` reads back as `# Foo`. It is stable (it does not drift further
-on subsequent round trips), but the level is not preserved.
+**Heading depth is flattened below level 3.** Apple's markdown converter maps `#` to Notes'
+*Title* style and `##` to its *Heading* style, both of which round trip intact. `###` maps
+to *Heading* as well — Notes has a *Subheading* style (`style_type` 2) but the converter
+never emits it — so `### Foo` reads back as `## Foo`. Deeper levels collapse the same way.
+The loss is one level and it is stable: reading `## Foo` back and rewriting it yields
+`## Foo`, so it does not drift on repeated round trips. Pinned by
+`tests/test_apple_conversions.py`.
+
+**Links gain a trailing slash.** Notes normalises a bare-host URL, so
+`https://example.com` comes back as `https://example.com/`. Harmless, and stable after the
+first round trip, but it means one write/read cycle is not byte-identical.
 
 **Folders must already exist.** `create_note` resolves the folder before writing anything —
 the note is created first and moved second, so a bad name would otherwise strand it in the

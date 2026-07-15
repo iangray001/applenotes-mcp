@@ -147,7 +147,16 @@ def _load(note_pk: int) -> tuple[str, list[Run]]:
     if not row or not row[0]:
         raise NoteStoreError(f"no note data for note {note_pk} (a locked note?)")
 
-    raw = gzip.decompress(bytes(row[0]))
+    return decode(bytes(row[0]))
+
+
+def decode(zdata: bytes) -> tuple[str, list[Run]]:
+    """Decode a raw ZICNOTEDATA.ZDATA blob into its text and attribute runs.
+
+    Split out from the database read so the reader can be tested against captured blobs
+    (tests/fixtures/*.zdata) without a NoteStore, or a Notes.app, anywhere in sight.
+    """
+    raw = gzip.decompress(zdata)
     document = _first(raw, 2)
     note = _first(document, 3) if document else None
     if note is None:

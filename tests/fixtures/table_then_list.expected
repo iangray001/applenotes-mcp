@@ -1,0 +1,8 @@
+# fixture-table_then_list
+
+| Col | Val |
+| --- | --- |
+| x | 1 |
+
+- bullet after the table
+- another

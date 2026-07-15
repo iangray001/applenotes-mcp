@@ -14,3 +14,16 @@ applenotes-mcp = "applenotes_mcp.server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tier 1 (pure functions) and tier 2 (golden protobuf fixtures) need neither Notes.app nor
+# the NoteStore database, so a bare `pytest` is hermetic and safe. Anything that touches the
+# real, iCloud-synced library must be marked `live` and is deselected by default.
+addopts = "-m 'not live'"
+markers = [
+    "live: touches the real Notes library (creates/deletes notes). Opt in with -m live.",
+]

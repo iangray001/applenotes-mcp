@@ -1,0 +1,7 @@
+Before the list.
+
+- [ ] unticked item
+- [x] ticked item
+- [ ] another unticked
+
+After the list.
