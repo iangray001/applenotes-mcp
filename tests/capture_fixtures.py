@@ -19,6 +19,9 @@ that failing test is the specification for the fix.
 
 The notes are left in the fixture folder afterwards, so they can be inspected in Notes.app.
 Re-running replaces them.
+
+NOTE: the `attachments.*` fixture is NOT regenerated here -- the bridge cannot add images or
+PDFs to a note, so it was captured by hand from a note built in Notes.app. Leave it be.
 """
 
 from __future__ import annotations

@@ -1,0 +1,17 @@
+# Test Note with Attachments
+
+This is some text
+
+Here is an attached image:
+
+[attachment: public.png]
+
+Here is an attached PDF:
+
+[attachment: com.adobe.pdf]
+
+And here is a table which we already handle:
+
+| Heading 1 | Heading 2 |
+| --- | --- |
+| Data 1 | Data 2 |

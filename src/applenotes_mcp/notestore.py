@@ -49,6 +49,10 @@ NOTESTORE = (
 
 OBJECT_PLACEHOLDER = "￼"
 
+# The UTI Notes gives a table. A table's content is a CRDT in a separate attachment, not a
+# file on disk, so it is spliced from the HTML rather than resolved to a path.
+TABLE_UTI = "com.apple.notes.table"
+
 STYLE_TITLE = 0
 STYLE_HEADING = 1
 STYLE_SUBHEADING = 2
@@ -115,6 +119,11 @@ class Run:
     weight: int = 0
     monospaced: bool = False
     link: str | None = None
+    # An inline attachment carries a U+FFFC placeholder in the text and an AttachmentInfo
+    # (field 12) here: its identifier (the ICAttachment ZIDENTIFIER) and type UTI. Tables
+    # and real files (images, PDFs) are told apart by this UTI.
+    att_identifier: str | None = None
+    att_uti: str | None = None
 
 
 @dataclass
@@ -190,6 +199,11 @@ def decode(zdata: bytes) -> tuple[str, list[Run]]:
                 run.weight = rval
             elif rnum == 9 and rwire == 2:
                 run.link = rval.decode("utf-8", "replace")
+            elif rnum == 12 and rwire == 2:
+                ident = _first(rval, 1)
+                uti = _first(rval, 2)
+                run.att_identifier = ident.decode("utf-8", "replace") if ident else None
+                run.att_uti = uti.decode("utf-8", "replace") if uti else None
         runs.append(run)
 
     return text, runs
@@ -253,22 +267,49 @@ def _inline(text: str, run: Run, in_heading: bool = False) -> str:
     return text[:lead] + core + text[len(text) - trail :] if trail else text[:lead] + core
 
 
-def _render(paragraphs: list[Paragraph], tables: list[str]) -> str:
+def _render(
+    paragraphs: list[Paragraph],
+    tables: list[str],
+    media: dict[str, str] | None = None,
+) -> str:
+    """Reconstruct markdown. `tables` supplies each table's markdown in document order;
+    `media` maps an attachment identifier to the markdown for that file (an image or link).
+
+    Every U+FFFC placeholder is resolved from the attachment run that carries it: a table
+    is spliced from `tables`, a file is looked up in `media`. Deciding per run -- rather
+    than assuming every placeholder is the next table -- is what stops an image before a
+    table from consuming the table's slot.
+    """
+    media = media or {}
     lines: list[str] = []
     number = 0
     table_index = 0
 
+    def resolve_placeholder(run: Run) -> str:
+        nonlocal table_index
+        if run.att_uti == TABLE_UTI or run.att_uti is None:
+            # A table, or a placeholder with no attachment info (legacy notes): take the
+            # next table from the HTML, preserving the old behaviour for the latter.
+            table = tables[table_index] if table_index < len(tables) else ""
+            table_index += 1
+            return table
+        return media.get(run.att_identifier or "", f"[attachment: {run.att_uti}]")
+
     for para in paragraphs:
         in_heading = para.style_type in HEADING_PREFIX
-        body = "".join(_inline(text, run, in_heading) for text, run in para.runs)
 
-        if OBJECT_PLACEHOLDER in body:
-            for _ in range(body.count(OBJECT_PLACEHOLDER)):
-                replacement = tables[table_index] if table_index < len(tables) else ""
-                table_index += 1
-                body = body.replace(OBJECT_PLACEHOLDER, "\n" + replacement + "\n", 1)
-            lines.extend(body.strip("\n").splitlines())
+        if any(OBJECT_PLACEHOLDER in text for text, _ in para.runs):
+            parts: list[str] = []
+            for text, run in para.runs:
+                for piece in re.split(f"({OBJECT_PLACEHOLDER})", text):
+                    if piece == OBJECT_PLACEHOLDER:
+                        parts.append("\n" + resolve_placeholder(run) + "\n")
+                    elif piece:
+                        parts.append(_inline(piece, run, in_heading))
+            lines.extend("".join(parts).strip("\n").splitlines())
             continue
+
+        body = "".join(_inline(text, run, in_heading) for text, run in para.runs)
 
         style = para.style_type
         if style != STYLE_NUMBERED:
@@ -400,12 +441,22 @@ def note_folder(note_id: str) -> Folder | None:
         return None
 
 
-def read_note_markdown(note_id: str, tables: list[str] | None = None) -> str:
+def read_note_markdown(
+    note_id: str,
+    tables: list[str] | None = None,
+    media: dict[str, str] | None = None,
+) -> str:
     """Reconstruct a note's markdown from Notes' protobuf.
 
-    `tables` supplies the markdown for each table in the note, in order; they are
-    spliced into the U+FFFC placeholders. Callers should pass the tables extracted
-    from the AppleScript HTML, which renders them faithfully.
+    `tables` supplies the markdown for each table in the note, in order (from the
+    AppleScript HTML, which renders tables faithfully). `media` maps a file attachment's
+    identifier to its rendered markdown; when omitted it is resolved from the on-disk
+    media store. Pass `media={}` to render without touching disk -- as the tests do.
     """
-    text, runs = _load(_note_pk(note_id))
-    return _render(_paragraphs(text, runs), tables or [])
+    pk = _note_pk(note_id)
+    text, runs = _load(pk)
+    if media is None:
+        from .attachments import note_media
+
+        media = note_media(pk)
+    return _render(_paragraphs(text, runs), tables or [], media)

@@ -71,9 +71,25 @@ lossy in different ways. AppleScript can convert notes to HTML, but it cannot se
 box and a plain bullet are both just `<li>text</li>`) and it also merges a numbered list into a
 preceding bullet list. Meanwhile Shortcuts' *Make Markdown from Rich Text* destroys tables and flattens
 headings. The protobuf in `ZICNOTEDATA.ZDATA` has paragraph styles, checklist
-state, inline formatting etc. so we read that (read-only) and reconstruct markdown. Tables are
-not stored in the protobuf (they are separate attachment objects), but they can be taken
-from Applescript HTML and spliced in to the markdown.
+state, inline formatting etc. so we read that (read-only) and reconstruct markdown.
+
+Inline objects appear in the protobuf text only as a `U+FFFC` placeholder, but the
+attribute run carrying each one records its identifier and type UTI. That is enough to
+handle every kind:
+
+* **Tables** hold their content as a CRDT in a separate object, not in the note protobuf,
+  so their text is taken from the AppleScript HTML (which renders tables faithfully) and
+  spliced into the placeholder.
+* **Files** (images, PDFs, …) are resolved to their path on disk. The attachment's
+  identifier joins to a media row (`ZMEDIA`) carrying a filename, and the file lives at
+  `<container>/Media/<media-id>/<generation-dir>/<filename>`. `read_note` emits an image
+  as `![name](file://…)` and any other file as `[name](file://…)`; a file present in the
+  note but not downloaded from iCloud becomes a visible `[attachment not downloaded: …]`
+  marker rather than a broken link.
+
+Reading the UTI per placeholder is also what keeps them aligned: an image sitting before a
+table no longer consumes the table's slot, because each placeholder is resolved from the
+run that carries it rather than by assuming every placeholder is the next table.
 
 **Editing is delete-and-recreate**, not in-place — see Limitations.
 
@@ -245,10 +261,9 @@ The MCP contract test is in this file group but is itself hermetic: it spawns th
 over stdio and snapshots what a client sees — tool names, input schemas, the
 `readOnly`/`destructive` annotations, the server instructions — without touching any note.
 
-Three tests are `xfail(strict=True)`, marking known bugs so the suite tells us the moment
-one is fixed: two are markdown-inside-a-code-fence cases, and one is the attachment
-placeholder misalignment (an image before a table steals the table's slot) that the
-forthcoming attachment work will close.
+Two tests are `xfail(strict=True)`, marking known bugs so the suite tells us the moment one
+is fixed: both are markdown-inside-a-code-fence cases (`- [ ]` and `| - |` inside a fence
+being treated as real markup).
 
 ## Notes on the Shortcuts CLI, learned the hard way
 

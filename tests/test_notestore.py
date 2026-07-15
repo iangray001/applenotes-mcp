@@ -16,6 +16,7 @@ from applenotes_mcp.notestore import (
     STYLE_HEADING,
     STYLE_NUMBERED,
     STYLE_TITLE,
+    TABLE_UTI,
     Run,
     _paragraphs,
     _render,
@@ -24,7 +25,11 @@ from applenotes_mcp.notestore import (
 BOLD, ITALIC = 1, 2
 
 
-def render(*runs: tuple[str, Run], tables: list[str] | None = None) -> str:
+def render(
+    *runs: tuple[str, Run],
+    tables: list[str] | None = None,
+    media: dict[str, str] | None = None,
+) -> str:
     """Render (text, run) pairs as one note. Run.length is derived, so tests need not
     count UTF-16 code units by hand -- getting that wrong in the test would mask the very
     bug the test is looking for."""
@@ -33,7 +38,7 @@ def render(*runs: tuple[str, Run], tables: list[str] | None = None) -> str:
     for chunk, run in runs:
         run.length = len(chunk.encode("utf-16-le")) // 2
         sized.append(run)
-    return _render(_paragraphs(text, sized), tables or [])
+    return _render(_paragraphs(text, sized), tables or [], media or {})
 
 
 # -- paragraph styles ----------------------------------------------------------------
@@ -154,33 +159,46 @@ def test_a_table_is_spliced_into_its_placeholder() -> None:
     assert OBJECT_PLACEHOLDER not in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="U+FFFC marks EVERY inline object, not just tables; an image before a table "
-    "makes the table splice into the image's placeholder. To be fixed with attachments.",
-)
 def test_an_image_before_a_table_does_not_steal_the_tables_placeholder() -> None:
-    # The note is: prose, an IMAGE, then a TABLE. There is one table, so tables=[table].
-    # Today _render fills placeholders in order and puts the table where the image was,
-    # leaving the table's own placeholder empty -- silently wrong output, in a note that
-    # edit_note would refuse but read_note happily mangles.
+    # The note is: prose, an IMAGE, then a TABLE, with one table so tables=[table]. The
+    # image and table are told apart by the UTI on their runs, so the image resolves from
+    # `media` and never consumes the table's slot. This was the placeholder-misalignment
+    # bug; each placeholder is now resolved from the run that carries it.
     table = "| a | b |\n| --- | --- |\n| 1 | 2 |"
     out = render(
         ("intro\n", Run(0)),
-        (OBJECT_PLACEHOLDER + "\n", Run(0)),  # the image
-        (OBJECT_PLACEHOLDER + "\n", Run(0)),  # the table
+        (OBJECT_PLACEHOLDER + "\n", Run(0, att_uti="public.png", att_identifier="img1")),
+        (OBJECT_PLACEHOLDER + "\n", Run(0, att_uti=TABLE_UTI)),
         tables=[table],
+        media={"img1": "![pic](file:///pic.png)"},
     )
     lines = [ln for ln in out.splitlines() if ln.strip()]
     assert lines[0] == "intro"
-    assert lines[1] != "| a | b |", "the table was spliced into the image's placeholder"
-    assert table in out
+    assert lines[1] == "![pic](file:///pic.png)", "image slot did not get the image"
+    assert table in out, "the single table was lost"
 
 
-def test_no_placeholder_survives_into_the_output_even_with_no_tables() -> None:
-    # Whatever we decide an image should render as, a raw U+FFFC is never right: it is
-    # invisible in the model's context and silently corrupts a subsequent edit.
-    out = render(("intro\n", Run(0)), (OBJECT_PLACEHOLDER + "\n", Run(0)), tables=[])
+def test_a_file_attachment_is_resolved_from_media_by_its_identifier() -> None:
+    out = render(
+        (OBJECT_PLACEHOLDER + "\n", Run(0, att_uti="com.adobe.pdf", att_identifier="doc1")),
+        media={"doc1": "[report.pdf](file:///report.pdf)"},
+    )
+    assert out.strip() == "[report.pdf](file:///report.pdf)"
+
+
+def test_a_file_placeholder_not_in_media_falls_back_to_a_visible_marker() -> None:
+    # DB unreadable, say: note_media returns {}. A raw U+FFFC must never survive -- it is
+    # invisible to the model and silently corrupts a later edit -- so a marker stands in.
+    out = render((OBJECT_PLACEHOLDER + "\n", Run(0, att_uti="public.png")), media={})
+    assert OBJECT_PLACEHOLDER not in out
+    assert "public.png" in out
+
+
+def test_a_placeholder_with_no_attachment_info_is_treated_as_a_table() -> None:
+    # Legacy notes may carry a placeholder run with no AttachmentInfo. The old behaviour
+    # was to splice the next table there; preserve it rather than guess.
+    out = render((OBJECT_PLACEHOLDER + "\n", Run(0)), tables=["| a |\n| --- |\n| 1 |"])
+    assert "| a |" in out
     assert OBJECT_PLACEHOLDER not in out
 
 
