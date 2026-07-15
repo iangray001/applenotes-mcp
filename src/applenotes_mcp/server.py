@@ -37,9 +37,11 @@ from .attachments import unresolved_attachments
 from .html_to_markdown import extract_tables, html_to_markdown
 from .notestore import (
     Folder,
+    NoteDetails,
     NoteStoreError,
     _note_pk,
     folders,
+    note_details,
     note_folder,
     read_note_markdown,
 )
@@ -56,6 +58,9 @@ Working with note IDs:
     unrelated note.
   * `search_notes` matches on the TITLE ONLY, not the body. "no matches" therefore means
     no note has that word in its title; it does not mean no note mentions it.
+  * Each `search_notes` row carries the note's folder, modification date and a body snippet
+    alongside its id. When several notes share a title, use those to let the user pick the
+    right one rather than guessing.
 
 Writing:
   * `create_note` needs an existing folder; this server never creates one. Call
@@ -433,6 +438,24 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
     return f"{new_id} (was {note_id}; backup at {backup})"
 
 
+def _format_search(matches: list[tuple[str, str]], details: dict[int, NoteDetails]) -> str:
+    """One tab-separated row per match: id, title, folder, modified, snippet.
+
+    The extra columns are what let a caller tell apart notes that share a title -- two
+    "Recipes", one in `Personal/Recipes` edited today, one in `Work/Cakes` edited in March.
+    Missing detail (an unreadable NoteStore) just leaves those columns blank.
+    """
+    rows = []
+    for note_id, title in matches:
+        try:
+            d = details.get(_note_pk(note_id))
+        except NoteStoreError:
+            d = None
+        folder, modified, snippet = (d.folder, d.modified, d.snippet) if d else ("", "", "")
+        rows.append("\t".join([note_id, title, folder, modified, snippet]))
+    return "\n".join(rows) or "no matches"
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Find notes by title",
@@ -442,9 +465,13 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
     )
 )
 def search_notes(query: str, limit: int = 10) -> str:
-    """Find notes whose TITLE contains `query`. Returns `id<TAB>title` lines.
+    """Find notes whose TITLE contains `query`, most recently modified first.
 
-    This is the only way to obtain a note ID, which `read_note` and `edit_note` both need.
+    Returns one row per match, tab-separated: `id`, `title`, `folder`, `modified`
+    (`YYYY-MM-DD HH:MM`), `snippet` (a one-line body preview). The `id` is the only way to
+    obtain a note ID, which `read_note` and `edit_note` both need; the other columns are for
+    telling apart notes that share a title -- present several to the user by folder and date
+    rather than guessing which is meant.
 
     It does NOT search note bodies. "no matches" means no note has `query` in its title --
     it does not mean no note mentions it, so do not conclude from this that the content
@@ -459,8 +486,20 @@ def search_notes(query: str, limit: int = 10) -> str:
             return out
         end tell
     """)
-    lines = [line for line in raw.splitlines() if line.strip()]
-    return "\n".join(lines[:limit]) or "no matches"
+    matches: list[tuple[str, str]] = []
+    for line in raw.splitlines():
+        note_id, _, title = line.partition("\t")
+        if note_id.strip():
+            matches.append((note_id.strip(), title))
+    matches = matches[:limit]
+
+    try:
+        details = note_details([_note_pk(nid) for nid, _ in matches])
+    except NoteStoreError:
+        details = {}
+    # Most recently modified first; blank dates (undetermined) sort last.
+    matches.sort(key=lambda m: details.get(_note_pk(m[0]), NoteDetails("", "", "")).modified, reverse=True)
+    return _format_search(matches, details)
 
 
 def main() -> None:

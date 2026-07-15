@@ -28,6 +28,7 @@ import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 NOTESTORE = (
@@ -426,6 +427,53 @@ def note_folder(note_id: str) -> Folder | None:
         return next((f for f in folders() if f.pk == row[0]), None)
     except (sqlite3.Error, NoteStoreError):
         return None
+
+
+@dataclass(frozen=True)
+class NoteDetails:
+    folder: str  # the note's folder path, "" if it cannot be determined
+    modified: str  # "YYYY-MM-DD HH:MM" local time, "" if unknown
+    snippet: str  # a one-line preview of the body
+
+
+def note_details(pks: list[int]) -> dict[int, NoteDetails]:
+    """Folder path, modification date and a body snippet for each note pk.
+
+    Used to enrich search results so notes that share a title (two "Recipes", say) can be
+    told apart. Fails soft: an unreadable database yields an empty map and the caller falls
+    back to bare id/title.
+    """
+    if not pks:
+        return {}
+    try:
+        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
+        placeholders = ",".join("?" * len(pks))
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT Z_PK, ZFOLDER, ZMODIFICATIONDATE1, ZSNIPPET
+                FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK IN ({placeholders})
+                """,
+                pks,
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    folder_path = {f.pk: f.path for f in folders()}
+    out: dict[int, NoteDetails] = {}
+    for pk, folder_pk, modified, snippet in rows:
+        # Core Data timestamps count seconds from 2001-01-01; shift to the Unix epoch.
+        when = (
+            datetime.fromtimestamp(modified + 978307200).strftime("%Y-%m-%d %H:%M")
+            if modified
+            else ""
+        )
+        out[pk] = NoteDetails(
+            folder=folder_path.get(folder_pk, ""),
+            modified=when,
+            snippet=re.sub(r"\s+", " ", snippet or "").strip()[:80],
+        )
+    return out
 
 
 def read_note_markdown(

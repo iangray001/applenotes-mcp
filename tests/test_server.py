@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from applenotes_mcp import server
-from applenotes_mcp.notestore import Folder, NoteStoreError
+from applenotes_mcp.notestore import Folder, NoteDetails, NoteStoreError
 
 NOTE_ID = "x-coredata://32CD64CC-0000-0000-0000-000000000000/ICNote/p123"
 
@@ -88,6 +88,41 @@ def test_folder_id_is_derived_from_the_notes_own_store_uuid(
 
 def test_applescript_strings_are_escaped() -> None:
     assert server._as_str('say "hi"\\') == '"say \\"hi\\"\\\\"'
+
+
+# -- search result formatting --------------------------------------------------------
+
+
+def _id(pk: int) -> str:
+    return f"x-coredata://STORE/ICNote/p{pk}"
+
+
+def test_search_rows_carry_id_title_folder_date_snippet() -> None:
+    matches = [(_id(1), "Recipes")]
+    details = {1: NoteDetails(folder="Personal/Recipes", modified="2026-03-01 09:00", snippet="flour, sugar")}
+    row = server._format_search(matches, details)
+    assert row == f"{_id(1)}\tRecipes\tPersonal/Recipes\t2026-03-01 09:00\tflour, sugar"
+
+
+def test_same_titled_notes_are_distinguished_by_folder_and_date() -> None:
+    # The whole point: two "Recipes" the caller can actually tell apart.
+    matches = [(_id(1), "Recipes"), (_id(2), "Recipes")]
+    details = {
+        1: NoteDetails("Personal/Recipes", "2026-07-01 10:00", "cookies"),
+        2: NoteDetails("Work/Cakes/Recipes", "2026-03-15 08:00", "sponge"),
+    }
+    out = server._format_search(matches, details).splitlines()
+    assert "Personal/Recipes" in out[0] and "Work/Cakes/Recipes" in out[1]
+
+
+def test_missing_details_leave_columns_blank_not_broken() -> None:
+    # NoteStore unreadable: still return id and title, just without the extra columns.
+    row = server._format_search([(_id(1), "Note")], {})
+    assert row == f"{_id(1)}\tNote\t\t\t"
+
+
+def test_no_matches_message() -> None:
+    assert server._format_search([], {}) == "no matches"
 
 
 # -- title handling ------------------------------------------------------------------
