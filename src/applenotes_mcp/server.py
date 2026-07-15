@@ -56,9 +56,12 @@ Working with note IDs:
   * A note ID always comes from `search_notes`. Never construct or guess one -- they are
     Core Data URLs (x-coredata://.../ICNote/p123), and a wrong guess addresses a real but
     unrelated note.
-  * `search_notes` matches on the TITLE ONLY, not the body. "no matches" therefore means
-    no note has that word in its title; it does not mean no note mentions it.
-  * Each `search_notes` row carries the note's folder, modification date and a body snippet
+  * `search_notes` matches on the TITLE ONLY. To find notes that *mention* something in
+    their body, use `search_note_text` (full-text over title and body). Reach for
+    `search_notes` when you know the title -- it is faster -- and `search_note_text` when
+    you don't. If a title search comes up empty, try `search_note_text` before telling the
+    user a note does not exist. Both return the same rows and take the same id.
+  * Each search row carries the note's folder, modification date and a body snippet
     alongside its id. When several notes share a title, use those to let the user pick the
     right one rather than guessing.
 
@@ -456,31 +459,16 @@ def _format_search(matches: list[tuple[str, str]], details: dict[int, NoteDetail
     return "\n".join(rows) or "no matches"
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Find notes by title",
-        readOnlyHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
-    )
-)
-def search_notes(query: str, limit: int = 10) -> str:
-    """Find notes whose TITLE contains `query`, most recently modified first.
+def _search(field: str, query: str, limit: int) -> str:
+    """Run a `notes whose <field> contains <query>` search and format the enriched rows.
 
-    Returns one row per match, tab-separated: `id`, `title`, `folder`, `modified`
-    (`YYYY-MM-DD HH:MM`), `snippet` (a one-line body preview). The `id` is the only way to
-    obtain a note ID, which `read_note` and `edit_note` both need; the other columns are for
-    telling apart notes that share a title -- present several to the user by folder and date
-    rather than guessing which is meant.
-
-    It does NOT search note bodies. "no matches" means no note has `query` in its title --
-    it does not mean no note mentions it, so do not conclude from this that the content
-    does not exist.
+    `field` is a fixed AppleScript literal (`name` or `plaintext`), never user input, so it
+    is safe to interpolate; only `query` is quoted.
     """
     raw = _osascript(f"""
         tell application "Notes"
             set out to ""
-            repeat with n in (notes whose name contains {_as_str(query)})
+            repeat with n in (notes whose {field} contains {_as_str(query)})
                 set out to out & (id of n) & tab & (name of n) & linefeed
             end repeat
             return out
@@ -500,6 +488,51 @@ def search_notes(query: str, limit: int = 10) -> str:
     # Most recently modified first; blank dates (undetermined) sort last.
     matches.sort(key=lambda m: details.get(_note_pk(m[0]), NoteDetails("", "", "")).modified, reverse=True)
     return _format_search(matches, details)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Find notes by title",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+def search_notes(query: str, limit: int = 10) -> str:
+    """Find notes whose TITLE contains `query`, most recently modified first.
+
+    Returns one row per match, tab-separated: `id`, `title`, `folder`, `modified`
+    (`YYYY-MM-DD HH:MM`), `snippet` (a one-line body preview). The `id` is the only way to
+    obtain a note ID, which `read_note` and `edit_note` both need; the other columns are for
+    telling apart notes that share a title -- present several to the user by folder and date
+    rather than guessing which is meant.
+
+    This searches TITLES only and is fast. If it returns no matches -- or you are after
+    notes that *mention* something rather than are titled after it -- fall back to
+    `search_note_text`, which also searches bodies. "no matches" here never means the
+    content is absent, only that no title contains `query`.
+    """
+    return _search("name", query, limit)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Full-text search notes",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+def search_note_text(query: str, limit: int = 10) -> str:
+    """Full-text search: find notes whose TEXT (title and body) contains `query`.
+
+    Same row format as `search_notes` (`id`, `title`, `folder`, `modified`, `snippet`),
+    most recently modified first. Use this when looking for notes that *mention* something
+    rather than notes titled after it; use `search_notes` when you know the title, as it is
+    faster. Matching is on the note's plain text, so formatting (checklists, tables) does not
+    affect what matches.
+    """
+    return _search("plaintext", query, limit)
 
 
 def main() -> None:

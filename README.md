@@ -40,13 +40,14 @@ shortcut makes a `Notes MCP Bridge 2` duplicate rather than replacing it.
 | `create_note(title, markdown, folder?)` | Create a formatted note, attachments and all. Returns its ID. |
 | `read_note(note_id)` | Read a note back as markdown. |
 | `edit_note(note_id, markdown, title?)` | Replace a note's body. **Destructive** — see below. |
-| `search_notes(query)` | Find notes by **title**. Returns `id<TAB>title<TAB>folder<TAB>modified<TAB>snippet`. Does not search bodies. |
+| `search_notes(query)` | Find notes by **title**. Returns `id<TAB>title<TAB>folder<TAB>modified<TAB>snippet`. |
+| `search_note_text(query)` | **Full-text** search over title and body. Same rows as `search_notes`. |
 | `list_folders()` | The folders a note can be filed into, as full paths. |
 
 The tools are annotated (`readOnlyHint`, `destructiveHint`), so a client can prompt for
 `edit_note` while auto-approving the readers, and the server ships `instructions` covering
-what spans the tools: IDs only ever come from `search_notes`; `search_notes` is title-only,
-so "no matches" does not mean the content is absent; prefer `create_note` over the
+what spans the tools: IDs only ever come from a search; `search_notes` is title-only (use
+`search_note_text` to search bodies); prefer `create_note` over the
 destructive `edit_note`.
 
 

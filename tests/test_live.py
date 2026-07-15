@@ -75,6 +75,24 @@ def test_a_created_note_is_filed_into_the_requested_folder(make_note) -> None:
     assert_in_live_folder(note_id)  # reads the folder back from NoteStore, not a guess
 
 
+# -- search --------------------------------------------------------------------------
+
+
+def test_title_search_finds_by_title_and_full_text_finds_by_body(make_note) -> None:
+    # A distinctive nonsense word in the BODY only, so title search misses it and full-text
+    # finds it. Also checks the enriched row carries the note's folder.
+    token = "zqxwv"  # unlikely to appear in any real note
+    note_id = make_note("search-target", f"A note whose body mentions {token} once.\n")
+
+    by_title = server.search_notes(token)
+    assert note_id not in by_title, "full-text token should not match on title"
+
+    by_text = server.search_note_text(token)
+    row = next((r for r in by_text.splitlines() if r.startswith(note_id)), None)
+    assert row is not None, "full-text search did not find the note by its body"
+    assert LIVE_FOLDER in row, "search row did not carry the note's folder"
+
+
 def test_read_back_recovers_the_features_that_were_written(make_note) -> None:
     md = server.read_note(make_note("features", RICH_BODY))
 
