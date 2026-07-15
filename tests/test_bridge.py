@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from applenotes_mcp.bridge import _widen_table_delimiters, split_blocks
+from applenotes_mcp.bridge import (
+    BridgeError,
+    _attachment_paths,
+    _file_ref,
+    _widen_table_delimiters,
+    split_blocks,
+)
 
 
 def kinds(markdown: str) -> list[str]:
@@ -89,6 +95,64 @@ def test_a_table_is_sent_as_its_own_block() -> None:
 
 def test_split_blocks_widens_delimiters_on_the_way_through() -> None:
     assert "| --- | --- |" in texts("| a | b |\n| - | - |\n| 1 | 2 |\n")[0]
+
+
+# -- file attachments ----------------------------------------------------------------
+
+
+def test_file_ref_recognises_a_file_url() -> None:
+    assert _file_ref("![pic](file:///tmp/a%20b/x.png)") == ("pic", "/tmp/a b/x.png")
+
+
+def test_file_ref_recognises_an_absolute_path() -> None:
+    assert _file_ref("[report.pdf](/Users/me/report.pdf)") == ("report.pdf", "/Users/me/report.pdf")
+
+
+def test_file_ref_uses_the_basename_when_no_label() -> None:
+    assert _file_ref("![](/tmp/photo.jpg)") == ("photo.jpg", "/tmp/photo.jpg")
+
+
+def test_file_ref_ignores_http_links() -> None:
+    assert _file_ref("[site](https://example.com)") is None
+
+
+def test_file_ref_ignores_relative_and_scheme_less_targets() -> None:
+    # Not addressable as a file to attach: a note must reference a real local path.
+    assert _file_ref("[x](docs/x.png)") is None
+    assert _file_ref("plain text") is None
+
+
+def test_a_file_line_becomes_a_file_block_carrying_its_path() -> None:
+    (block,) = split_blocks("![pic](/tmp/x.png)\n")
+    assert block["type"] == "file"
+    assert block["path"] == "/tmp/x.png"
+    assert block["name"] == "pic"
+
+
+def test_files_are_numbered_from_input_item_2_in_document_order() -> None:
+    # Input item 1 is the JSON payload, so the first file is item 2. The `n` is what the
+    # shortcut uses to fetch the right `-i` input, so its order must match the files.
+    blocks = split_blocks("![a](/tmp/a.png)\n\nprose\n\n[b](/tmp/b.pdf)\n")
+    files = [b for b in blocks if b["type"] == "file"]
+    assert [b["n"] for b in files] == ["2", "3"]
+
+
+def test_a_file_keeps_its_inline_position_between_prose() -> None:
+    kinds_ = kinds("intro\n\n![a](/tmp/a.png)\n\noutro\n")
+    assert kinds_ == ["markdown", "file", "markdown"]
+
+
+def test_attachment_paths_are_returned_in_n_order(tmp_path) -> None:
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    a.write_bytes(b"1"); b.write_bytes(b"2")
+    blocks = split_blocks(f"![a]({a})\n\n[b]({b})\n")
+    assert _attachment_paths(blocks) == [a, b]
+
+
+def test_a_missing_attachment_is_a_clean_error_before_the_shortcut_runs(tmp_path) -> None:
+    blocks = split_blocks(f"![gone]({tmp_path / 'nope.png'})\n")
+    with pytest.raises(BridgeError, match="attachment not found"):
+        _attachment_paths(blocks)
 
 
 # -- general -------------------------------------------------------------------------

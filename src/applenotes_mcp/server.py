@@ -33,9 +33,16 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from . import bridge
-from .attachments import destructible_attachments
+from .attachments import unresolved_attachments
 from .html_to_markdown import extract_tables, html_to_markdown
-from .notestore import Folder, NoteStoreError, folders, note_folder, read_note_markdown
+from .notestore import (
+    Folder,
+    NoteStoreError,
+    _note_pk,
+    folders,
+    note_folder,
+    read_note_markdown,
+)
 
 # Surfaced to the client as server-level guidance. This is for what spans the tools and
 # so belongs in no single docstring; per-tool detail stays on the tool.
@@ -53,19 +60,26 @@ Working with note IDs:
 Writing:
   * `create_note` needs an existing folder; this server never creates one. Call
     `list_folders` to see what is available rather than guessing a name.
-  * Heading depth is not preserved. Apple's markdown converter maps `##` onto Notes'
-    Title style, so `## Foo` reads back as `# Foo`. This is stable, not compounding --
-    do not try to correct for it by adding levels.
+  * The `title` argument is the note's title -- the bold first line Apple shows in the
+    notes list. Give a real one; do NOT also repeat it as a `# <title>` heading at the top
+    of the markdown.
+  * For section headings inside the body use `##`/`###`, not `#`. Apple's `#` is the Title
+    style, so a `#` heading in the body renders as a second title. `#` and `##` round-trip
+    intact; only `###` and deeper flatten (to `##`), stably -- do not add levels to correct
+    for it.
   * `- [ ]` and `- [x]` produce real, tickable checkboxes, and the ticked state survives a
     round trip. Use them for anything list-like the user might tick off.
+  * A whole-line `![alt](/local/path)` or `[name](/local/path)` attaches that local file
+    (image, PDF, ...) at that point, at any size. An http(s) link stays a link.
 
 Editing:
   * `edit_note` is DESTRUCTIVE: Apple offers no in-place rewrite that keeps formatting, so
     the note is deleted and recreated, and gets a NEW ID and a new creation date. Prefer
     `create_note` whenever the content is genuinely new.
   * To edit, `read_note` first and pass back the full modified markdown -- it replaces the
-    body wholesale, so anything omitted is gone.
-  * It refuses notes holding photos or PDFs, since recreating the note would destroy them.
+    body wholesale, so anything omitted is gone. Keep an attachment's `![](file://...)` line
+    to preserve it; drop it to remove it. Editing is refused only when a note has an
+    attachment that is not downloaded from iCloud (it cannot be re-attached).
 """
 
 mcp = FastMCP("applenotes", instructions=INSTRUCTIONS)
@@ -93,6 +107,27 @@ def _strip_leading_title(title: str, markdown: str) -> str:
     if lines and re.fullmatch(rf"#\s+{re.escape(title.strip())}\s*", lines[0]):
         return "\n".join(lines[1:]).lstrip()
     return markdown
+
+
+def _promote_title(markdown: str) -> tuple[str, str]:
+    """Derive a title from the markdown's first meaningful line; return (title, remainder).
+
+    Apple Notes has no separate title field -- the first line of a note IS its title. When
+    the caller gives a blank title we make that first line explicit rather than let Notes
+    pick: it skips images and table rows, so a note is never titled by its header image or
+    a table, and takes the first heading or line of prose instead. The line is removed from
+    the body so it is not then repeated beneath the title.
+    """
+    lines = markdown.strip().splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("|") or bridge._file_ref(stripped):
+            continue
+        title = re.sub(r"^#+\s+", "", stripped)  # heading marker
+        title = re.sub(r"^[-*]\s+(\[[ xX]\]\s+)?", "", title)  # list / checklist marker
+        title = re.sub(r"[*`_]", "", title).strip()[:200]  # inline emphasis
+        return title or "New Note", "\n".join(lines[:i] + lines[i + 1 :])
+    return "New Note", markdown
 
 
 def _note_field(note_id: str, field: str) -> str:
@@ -240,10 +275,19 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
     Notes objects -- unlike AppleScript-based servers, which force the whole note to
     a fixed font size and cannot produce tables at all.
 
+    Attachments: a whole-line image `![alt](/path/to/file)` or link `[name](/path)` whose
+    target is a LOCAL file (an absolute path or a file:// URL) is attached to the note at
+    that point, at any size. An http(s) link stays an ordinary link.
+
     Args:
-        title: the note's title.
-        markdown: the body as markdown. A leading `# <title>` is dropped, since Notes
-            takes the title from the title argument and would otherwise repeat it.
+        title: the note's title -- the bold first line Apple shows in the notes list, not
+            just metadata. Give it a real, descriptive value. If left blank, it is taken
+            from the first heading or line of prose in the markdown (never an image).
+        markdown: the body. Do NOT repeat the title as a `# <title>` heading at the top --
+            Notes already shows the title, and a leading one matching `title` is dropped.
+            For section headings inside the note use `##` and `###`: `#` is Apple's *Title*
+            style, so a `#` heading renders as a second title. `## Foo` round-trips as
+            `## Foo`; only `###` and deeper flatten (to `##`).
         folder: optional existing folder to file the note under, given as a name or, where
             the name is not unique, as a full path like "Personal/Projects/Recipes". Call
             list_folders to see what exists; an ambiguous name is rejected, not guessed.
@@ -254,6 +298,11 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
     # unknown or ambiguous name would otherwise leave the note stranded in the default
     # folder while the caller sees an error and assumes nothing happened.
     target = _resolve_folder(folder) if folder else None
+
+    # A blank title would let Notes title the note from whatever lands first -- including a
+    # header image. Derive a text title from the markdown instead.
+    if not title.strip():
+        title, markdown = _promote_title(markdown)
 
     note_id = _create_and_identify(title, markdown)
     if target:
@@ -275,11 +324,12 @@ def read_note(note_id: str) -> str:
     Reconstructed from Notes' own protobuf, so checklists come back with their ticked
     state, and a numbered list is not confused with a bullet list -- neither of which
     the HTML AppleScript exports can express. Tables are taken from the HTML, since the
-    protobuf holds them only as a placeholder.
+    protobuf holds them only as a placeholder. File attachments (images, PDFs) come back
+    as `![name](file://...)` / `[name](file://...)` pointing at the file on disk.
 
-    Heading depth is not preserved, but that is a write-side loss, not a read-side one:
-    Apple's markdown converter maps `##` onto Notes' Title style, so `## Foo` was already
-    stored as a title and reads back as `# Foo`.
+    Heading depth is preserved through `##`; only `###` and deeper are flattened (to `##`),
+    and that is a write-side loss, not a read-side one -- `### Foo` was already stored as a
+    Heading. `#` is Apple's Title style, so the note's own title reads back as `# <title>`.
 
     Falls back to the HTML alone if the protobuf cannot be read, which loses checklists;
     `edit_note` refuses to run in that state rather than rewrite from a degraded read.
@@ -311,8 +361,11 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
     note ID and a new creation date. The original is backed up to
     ~/.local/share/applenotes-mcp/backups first.
 
-    Notes holding attachments are refused, because recreating the note would destroy
-    them. Read the note, edit that markdown, and pass it back here.
+    Attachments are preserved: keep their `![name](file://...)` / `[name](file://...)`
+    lines in the markdown you pass back and they are re-attached; drop a line to remove that
+    attachment. The one exception is an attachment that is not downloaded locally (evicted
+    to iCloud) -- the note is refused, since that file cannot be re-attached. The normal flow
+    is to `read_note`, edit that markdown, and pass it back here.
 
     Returns the new note's ID.
     """
@@ -334,12 +387,17 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
             "Grant Full Disk Access, or read the note and create a new one instead."
         ) from exc
 
-    at_risk = destructible_attachments(note_id)
-    if at_risk:
+    # Attachments survive the rewrite: read_note emitted a file:// path for each, so the
+    # markdown re-attaches them, and the create-before-delete order below keeps the source
+    # files alive until the copies are made. The exception is a file that is NOT on disk
+    # (evicted to iCloud): it read back as a marker, not a path, so recreating would drop it.
+    # Refuse only that case.
+    stranded = unresolved_attachments(_note_pk(note_id))
+    if stranded:
         raise ValueError(
-            f"refusing to edit: this note has attachments that recreating it would "
-            f"destroy ({', '.join(at_risk)}). Apple offers no in-place rewrite that "
-            "preserves formatting. Tables are fine -- they are rebuilt from markdown."
+            f"refusing to edit: {len(stranded)} attachment(s) are not downloaded locally "
+            f"({', '.join(stranded)}), so they cannot be re-attached and recreating the "
+            "note would drop them. Open the note in Notes to download them, then retry."
         )
 
     new_title = title or old_title
@@ -359,6 +417,12 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
     if new_id == note_id:
         raise RuntimeError("internal error: replacement resolved to the original note")
 
+    # ORDER MATTERS: create the replacement BEFORE deleting the original. Beyond keeping the
+    # original intact if creation fails, this is what could make editing attachment-bearing
+    # notes work: read_note emits file:// paths to the original's on-disk Media files, so the
+    # replacement can re-attach them (Notes copies on attach) while the original -- and thus
+    # those files -- still exists. Delete first and those paths would be dangling. If the
+    # attachment refusal above is ever relaxed, do not reorder these two steps.
     _osascript(f'tell application "Notes" to delete note id {_as_str(note_id)}')
     if folder:
         # By ID, so a note that lived in one of two same-named folders goes back to the

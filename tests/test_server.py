@@ -107,6 +107,42 @@ def test_a_deeper_heading_matching_the_title_is_kept() -> None:
     assert server._strip_leading_title("Shopping", "## Shopping\n\nmilk\n").startswith("## ")
 
 
+# -- empty-title guard (_promote_title) ----------------------------------------------
+
+
+def test_a_blank_title_is_taken_from_a_leading_heading() -> None:
+    title, rest = server._promote_title("# Real Heading\n\nbody")
+    assert title == "Real Heading"
+    assert "Real Heading" not in rest  # removed, so it is not repeated under the title
+
+
+def test_a_blank_title_falls_back_to_the_first_prose_line() -> None:
+    title, _ = server._promote_title("Just some prose.\n\nmore")
+    assert title == "Just some prose."
+
+
+def test_a_note_is_never_titled_by_its_header_image() -> None:
+    # The danger the guard exists for: an image first must not become the title. It is
+    # skipped, and the title comes from the following text -- with the image left in place.
+    title, rest = server._promote_title("![cookies](file:///tmp/x.png)\n\nChocolate Cookies")
+    assert title == "Chocolate Cookies"
+    assert "![cookies]" in rest
+
+
+def test_a_leading_table_is_not_used_as_the_title() -> None:
+    title, _ = server._promote_title("| a | b |\n| --- | --- |\n\nAfter table")
+    assert title == "After table"
+
+
+def test_inline_emphasis_and_list_markers_are_stripped_from_a_derived_title() -> None:
+    assert server._promote_title("**Bold** intro")[0] == "Bold intro"
+    assert server._promote_title("- [ ] a task")[0] == "a task"
+
+
+def test_empty_markdown_yields_a_placeholder_title() -> None:
+    assert server._promote_title("")[0] == "New Note"
+
+
 # -- edit_note refusals --------------------------------------------------------------
 
 
@@ -115,7 +151,7 @@ def _stub_read(monkeypatch: pytest.MonkeyPatch, **overrides) -> None:
     monkeypatch.setattr(server, "_note_field", lambda _id, field: {"body": "<div>x</div>", "name": "Old"}[field])
     monkeypatch.setattr(server, "note_folder", lambda _id: None)
     monkeypatch.setattr(server, "read_note_markdown", lambda _id, tables=None: "true markdown\n")
-    monkeypatch.setattr(server, "destructible_attachments", lambda _id: [])
+    monkeypatch.setattr(server, "unresolved_attachments", lambda _pk: [])
     for name, value in overrides.items():
         monkeypatch.setattr(server, name, value)
 
@@ -132,11 +168,29 @@ def test_edit_refuses_when_the_protobuf_cannot_be_read(monkeypatch: pytest.Monke
         server.edit_note(NOTE_ID, "new body")
 
 
-def test_edit_refuses_a_note_with_real_attachments(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_read(monkeypatch, destructible_attachments=lambda _id: ["public.jpeg"])
+def test_edit_refuses_a_note_with_an_undownloaded_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An attachment not on disk reads back as a marker, not a re-attachable path, so
+    # recreating the note would silently drop it. That specific case is refused.
+    _stub_read(monkeypatch, unresolved_attachments=lambda _pk: ["photo.jpg"])
 
-    with pytest.raises(ValueError, match="refusing to edit"):
+    with pytest.raises(ValueError, match="not downloaded"):
         server.edit_note(NOTE_ID, "new body")
+
+
+def test_edit_allows_a_note_whose_attachments_are_all_on_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # The relaxation: a note WITH attachments is editable, as long as every one resolved to
+    # a file on disk (so read_note gave a re-attachable path). It must not be refused.
+    _stub_read(monkeypatch, unresolved_attachments=lambda _pk: [])
+    monkeypatch.setattr(server, "BACKUP_DIR", tmp_path)
+    monkeypatch.setattr(server, "_create_and_identify", lambda *_: NOTE_ID.replace("p123", "p999"))
+    monkeypatch.setattr(server, "_osascript", lambda _s: "")
+
+    result = server.edit_note(NOTE_ID, "![pic](file:///tmp/x.png)\n")
+    assert "p999" in result  # created and returned, not refused
 
 
 def test_edit_backs_up_the_true_markdown_not_the_degraded_html(

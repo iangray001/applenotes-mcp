@@ -1,7 +1,8 @@
 # applenotes-mcp
 
 An MCP server for Apple Notes that writes **properly formatted** notes: real headings,
-real bullet and numbered lists, real tables.
+real bullet and numbered lists, real tables, tickable checklists, and file attachments
+(images, PDFs) of any size.
 
 ## Why this exists
 
@@ -27,13 +28,16 @@ Register with Claude Code:
     claude mcp add applenotes -- uv run --directory /path/to/applenotes_mcp applenotes-mcp
 
 On first use the server generates and signs the bridge shortcut and asks you to import it
-(a one-time double-click; Shortcuts cannot be installed without user confirmation).
+(a one-time double-click; Shortcuts cannot be installed without user confirmation). When the
+bridge workflow itself changes (e.g. gaining attachment support), delete the old
+`Notes MCP Bridge` in the Shortcuts app first, then re-import — importing over a same-named
+shortcut makes a `Notes MCP Bridge 2` duplicate rather than replacing it.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `create_note(title, markdown, folder?)` | Create a formatted note. Returns its ID. |
+| `create_note(title, markdown, folder?)` | Create a formatted note, attachments and all. Returns its ID. |
 | `read_note(note_id)` | Read a note back as markdown. |
 | `edit_note(note_id, markdown, title?)` | Replace a note's body. **Destructive** — see below. |
 | `search_notes(query)` | Find notes by **title**. Returns `id<TAB>title`. Does not search bodies. |
@@ -51,20 +55,32 @@ destructive `edit_note`.
 ## How it works
 
 **Writing** goes through a generated Shortcut (`Notes MCP Bridge`), driven headlessly by
-`shortcuts run` with a JSON payload:
+`shortcuts run`. The markdown is split into ordered blocks — prose, individual checklist
+items, tables, and file attachments — and the shortcut walks them, handing each to the
+relevant Notes intent:
 
-    JSON {title, markdown}
-      → Get Dictionary Value
-      → Make Rich Text from Markdown
-      → Create Note (plain title)
-      → Append to Note (the rich text)
+    Create Note (plain title)
+    Repeat with each block:
+        checklist  → Append Checklist Item   (+ Set Checklist Items Checked if ticked)
+        file       → Add File to Note         (the file fetched by index from the inputs)
+        otherwise  → Make Rich Text from Markdown → Append to Note
 
-Converting an **empty** string to rich text first, and appending *that* to the accumulator
-variable, is what seeds the variable as an attributed string. Without it, everything
-appended afterwards is coerced to plain text and the formatting is lost. The note is built 
-piecewise in a while loop because the only way to add checklists is through the Checklist 
-intents which can only append. Therefore each part of the note to be created is handed to 
-the relevant intent.
+The note is built piecewise because checklists and attachments can only be *appended*: each
+part is handed to its intent in order, so ordering the appends is what positions the
+content. (Converting an empty string to rich text and appending that first also seeds the
+accumulator as an attributed string; without it, everything appended is coerced to plain
+text and the formatting is lost.)
+
+**Attachments** ride in as extra `shortcuts run` inputs, not in the JSON. The server invokes
+`shortcuts run "Notes MCP Bridge" -i payload.json -i file1 -i file2 …`, so input item 1 is
+the JSON and each file follows; a `file` block carries the input index of its file, and the
+shortcut fetches it with *Get Item from List* and calls **Add File to Note**. A whole-line
+`![alt](/local/path)` or `[name](/local/path)` in the markdown (a `file://` URL or an
+absolute path — an http link stays a link) becomes such a block, attached inline at its
+position. This roundabout route is forced: there is **no** way to hand the intent a
+filesystem *path* headlessly (see Limitations), but the `shortcuts` CLI reads the file with
+your own permissions and passes its bytes in as input, so there is no sandbox and no size
+limit — a multi-megabyte photo attaches byte-for-byte.
 
 **Reading** reads from Apple's on-disk store directly. Notes are stored as a protobuf (`notestore.py`). This is done because both of the more obvious read paths are
 lossy in different ways. AppleScript can convert notes to HTML, but it cannot see checklists at all (a ticked
@@ -109,8 +125,14 @@ That is circular, so `edit_note` instead reads the note, deletes it by ID (exact
 AppleScript) and recreates it through the bridge. It can never touch the wrong note, but:
 
 * the note gets a **new ID and a new creation date**;
-* notes with real attachments (photos, PDFs) are **refused** rather than having them
-  silently destroyed — tables are fine, they are rebuilt from the markdown;
+* **attachments survive.** `read_note` emits a `file://` path to each attachment's file on
+  disk, the replacement re-attaches them from those paths (Notes copies the file on attach),
+  and — this is the load-bearing detail — the replacement is created *before* the original
+  is deleted, so those files still exist at attach time. Keep an attachment's `![](file://…)`
+  line in the markdown to preserve it, drop the line to remove it. The one refusal is an
+  attachment that is **not downloaded locally** (evicted to iCloud): it reads back as a
+  marker rather than a path, so recreating could not re-attach it, and the edit is blocked
+  until you download it. Tables need none of this — they are rebuilt from the markdown;
 * if the note's true structure cannot be read from NoteStore, the edit is **refused**
   rather than run from the degraded HTML, which would turn checkboxes into plain bullets;
 * every edit writes a JSON backup to `~/.local/share/applenotes-mcp/backups/` first, and
@@ -210,6 +232,31 @@ this work:
   hand-built shortcut. It is the only way to write a ticked item, since Append Checklist
   Item has no `checked` parameter.
 
+## Attaching files, learned the hard way
+
+**Add File to Note** wants a *file*, and there is no headless way to hand it one by path.
+Both routes that look like they should work do not, and both fail *silently* under
+`shortcuts run` (no prompt can appear, so access is just denied):
+
+* **Get File** (`documentpicker.open`) resolves its path relative to a file provider
+  (iCloud Drive), so an absolute local path comes back as *“no such file.”* Granting
+  Shortcuts Full Disk Access changes nothing — it is not a permission failure.
+* **Get Contents of URL** on a `file://` URL fails with a CFNetwork error; its engine is a
+  network downloader and will not fetch local files.
+
+What *does* work is passing the file as the shortcut's **input**. The `shortcuts` CLI reads
+it with your own permissions — outside the shortcut sandbox — and hands the bytes in, so
+there is no path resolution, no scheme restriction, and no size cap.
+
+* `shortcuts run` takes **repeated `-i`**, and a shortcut that *iterates* its input sees
+  them all, so one run carries the JSON note-definition (item 1) plus every file (items
+  2…N). The note is created and the files attached in the **same run**, which sidesteps the
+  note-addressing problem entirely — no fuzzy `Find Notes`, no most-recent-note guess.
+* The rejected alternative was embedding bytes in the JSON as a `data:` URI through Get
+  Contents of URL. It works and is byte-perfect, but the data-URI string is capped around
+  **350 KB** — above that the run *succeeds with no attachment*. Direct input has no such
+  limit.
+
 ## Testing
 
     uv sync            # installs the dev group (pytest)
@@ -219,10 +266,13 @@ The suite is in three tiers, because the code has an awkward split: most of the 
 pure and trivially testable, but the parts that matter most (`edit_note`) delete real notes
 from a library that syncs to iCloud, where a bug in a *test* could destroy data.
 
-**Tier 1 — pure functions.** `split_blocks`, the table-delimiter widening, the protobuf
-renderer (`_paragraphs`/`_render`/`_inline`), the HTML scraper, and the `edit_note` safety
-invariants driven with fakes (refuses a degraded read, refuses real attachments, backs up
-the *true* markdown, never deletes the note it just created). No Notes, no NoteStore.
+**Tier 1 — pure functions.** `split_blocks` (including file-reference detection and the
+per-file input index), the table-delimiter widening, the protobuf renderer
+(`_paragraphs`/`_render`/`_inline`, image/table placeholders), the HTML scraper, the
+empty-title guard, and the `edit_note` safety invariants driven with fakes (refuses a
+degraded read, refuses an undownloaded attachment, allows on-disk ones, backs up the
+*true* markdown, never deletes the
+note it just created). No Notes, no NoteStore.
 
 **Tier 2 — golden fixtures.** `tests/fixtures/*.zdata` are real note protobufs captured from
 notes Notes itself wrote, paired with the AppleScript HTML and the expected markdown. The
@@ -236,10 +286,11 @@ markdown converter did to our input (`###` flattens to `##`, a bare URL gains a 
 slash). A failure there is *news about Apple*, not a regression in this code — and possibly
 a sign that a workaround can be deleted.
 
-**Tier 3 — live round trips** (`tests/test_live.py`, `tests/test_mcp_contract.py`). The one
-property nothing else can check: that a note written by the bridge and read back through the
-protobuf agree, and that reading-then-rewriting reaches a fixed point (`f(f(x)) == f(x)`)
-rather than drifting on every edit. These create and delete real notes, so they are **doubly
+**Tier 3 — live round trips** (`tests/test_live.py`, `tests/test_mcp_contract.py`). The
+properties nothing else can check: that a note written by the bridge and read back through
+the protobuf agree, that reading-then-rewriting reaches a fixed point (`f(f(x)) == f(x)`)
+rather than drifting on every edit, and that a local image referenced in the markdown is
+attached inline and byte-for-byte. These create and delete real notes, so they are **doubly
 gated** and off by default:
 
     APPLENOTES_MCP_LIVE=1 uv run pytest -m live

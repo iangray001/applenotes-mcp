@@ -1,35 +1,26 @@
-"""Tell real attachments (photos, PDFs) apart from inline objects (tables).
+"""Resolve a note's file attachments (photos, PDFs) to their files on disk.
 
-`count of attachments` in AppleScript counts a table as an attachment, so a naive
-"refuse to edit notes with attachments" rule would refuse exactly the notes this
-server is best at producing. The distinction only exists in Notes' own database:
-a table is UTI `com.apple.notes.table`, whereas a real file is `public.jpeg`,
-`com.adobe.pdf` and the like.
+An attachment appears in the note protobuf only as a placeholder carrying its identifier
+and type UTI. The identifier joins, in Notes' own database, to a media row (`ZMEDIA`) whose
+filename locates the file under `<container>/Media/`. We read that database read-only, never
+writing to it -- it is Core Data with CloudKit sync state alongside, and writing to it out
+from under a running Notes.app is a reliable way to corrupt a user's notes.
 
-We open NoteStore.sqlite read-only (immutable), purely to read those UTIs. We never
-write to it -- it is Core Data backed with CloudKit sync state alongside, and
-writing to it out from under a running Notes.app is a reliable way to corrupt a
-user's notes.
-
-If the database cannot be read (it needs Full Disk Access), we fail closed and
-treat every attachment as unsafe.
+Tables are not files -- their content is a CRDT, spliced from the AppleScript HTML instead --
+so they are excluded here by the JOIN on `ZMEDIA`, which they lack.
 """
 
 from __future__ import annotations
 
-import re
 import sqlite3
-import subprocess
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 NOTESTORE = (
     Path.home() / "Library" / "Group Containers" / "group.com.apple.notes" / "NoteStore.sqlite"
 )
 CONTAINER = NOTESTORE.parent
-
-# A table is regenerated faithfully from markdown, so recreating a note keeps it.
-INLINE_UTIS = {"com.apple.notes.table"}
 
 # For deciding image (`![]`) vs generic file (`[]`) when rendering an attachment. UTI first,
 # with a filename-extension fallback for the odd attachment that carries no/again UTI.
@@ -40,67 +31,7 @@ IMAGE_UTIS = {
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".tiff", ".tif", ".gif", ".webp"}
 
 
-def _attachment_pks(note_id: str) -> list[int]:
-    """Core Data primary keys of a note's attachments, via AppleScript."""
-    script = f'''
-        tell application "Notes"
-            set out to ""
-            repeat with a in attachments of note id "{note_id}"
-                set out to out & (id of a) & linefeed
-            end repeat
-            return out
-        end tell
-    '''
-    result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, timeout=30
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "AppleScript failed")
-
-    pks = []
-    for line in result.stdout.splitlines():
-        match = re.search(r"/ICAttachment/p(\d+)", line.strip())
-        if match:
-            pks.append(int(match.group(1)))
-    return pks
-
-
-def destructible_attachments(note_id: str) -> list[str]:
-    """UTIs of attachments that recreating the note would destroy.
-
-    Tables are excluded -- they survive, because we rebuild them from markdown.
-    Fails closed: if the UTI cannot be determined, the attachment is reported as
-    destructible.
-    """
-    pks = _attachment_pks(note_id)
-    if not pks:
-        return []
-
-    try:
-        # mode=ro, NOT immutable=1: immutable ignores the write-ahead log, so a table
-        # created seconds ago is invisible and would be misreported as a real
-        # attachment -- which would block editing the note we just wrote.
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        # closing(), not the connection's own context manager: that one only ends the
-        # transaction, and leaks the handle. This server is long-lived.
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
-            placeholders = ",".join("?" * len(pks))
-            rows = conn.execute(
-                f"SELECT Z_PK, ZTYPEUTI FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK IN ({placeholders})",
-                pks,
-            ).fetchall()
-        utis = {pk: uti for pk, uti in rows}
-    except sqlite3.Error:
-        return [f"unknown ({len(pks)} attachment(s); NoteStore unreadable)"]
-
-    return [
-        utis.get(pk) or "unknown"
-        for pk in pks
-        if utis.get(pk) not in INLINE_UTIS
-    ]
-
-
-# -- reading: resolving an inline attachment to its file on disk ---------------------
+# -- resolving an inline attachment to its file on disk ------------------------------
 
 
 def _media_bases() -> list[Path]:
@@ -150,16 +81,20 @@ def _attachment_markdown(uti: str | None, filename: str | None, path: Path | Non
     return f"![{name}]({uri})" if _is_image(uti, path) else f"[{name}]({uri})"
 
 
-def note_media(note_pk: int) -> dict[str, str]:
-    """Map each file attachment's identifier to the markdown that renders it.
+@dataclass(frozen=True)
+class FileAttachment:
+    identifier: str  # the ICAttachment ZIDENTIFIER, as carried on the note's placeholder run
+    uti: str | None
+    filename: str | None
+    path: Path | None  # the file on disk, or None if it is not present locally
 
-    Keyed by the ICAttachment ZIDENTIFIER, which is exactly what the note protobuf carries
-    on the attachment's placeholder run, so the reader can look each placeholder up by the
-    identifier it already has. Tables are excluded -- the JOIN on ZMEDIA drops them, since
-    a table has no media file (its content is a CRDT, spliced from the HTML instead).
 
-    Fails soft: an unreadable database yields an empty map, and read_note falls back to
-    leaving those placeholders empty rather than erroring.
+def note_file_attachments(note_pk: int) -> list[FileAttachment]:
+    """A note's file attachments (those with a media file), each resolved to disk.
+
+    Tables are excluded by the JOIN on ZMEDIA. Fails soft: an unreadable database yields an
+    empty list, and read_note falls back to leaving those placeholders empty rather than
+    erroring.
     """
     try:
         uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
@@ -174,10 +109,37 @@ def note_media(note_pk: int) -> dict[str, str]:
                 (note_pk,),
             ).fetchall()
     except sqlite3.Error:
-        return {}
+        return []
 
-    media: dict[str, str] = {}
-    for att_id, uti, media_id, filename in rows:
-        if att_id:
-            media[att_id] = _attachment_markdown(uti, filename, _media_path(media_id, filename))
-    return media
+    return [
+        FileAttachment(att_id, uti, filename, _media_path(media_id, filename))
+        for att_id, uti, media_id, filename in rows
+        if att_id
+    ]
+
+
+def note_media(note_pk: int) -> dict[str, str]:
+    """Map each file attachment's identifier to the markdown that renders it.
+
+    Keyed by the identifier the note protobuf carries on the placeholder run, so the reader
+    can look each placeholder up by the identifier it already has.
+    """
+    return {
+        a.identifier: _attachment_markdown(a.uti, a.filename, a.path)
+        for a in note_file_attachments(note_pk)
+    }
+
+
+def unresolved_attachments(note_pk: int) -> list[str]:
+    """Names of the note's file attachments whose file is NOT on disk.
+
+    `edit_note` recreates a note from the markdown `read_note` produced, and an attachment
+    that is not present locally (evicted to iCloud, say) reads back as a marker rather than
+    a re-attachable `file://` path -- so recreating would silently drop it. A non-empty list
+    here is edit_note's signal to refuse.
+    """
+    return [
+        a.filename or a.identifier
+        for a in note_file_attachments(note_pk)
+        if a.path is None
+    ]

@@ -57,6 +57,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 SHORTCUT_NAME = "Notes MCP Bridge"
 BRIDGE_DIR = Path.home() / ".local" / "share" / "applenotes-mcp"
@@ -65,6 +66,30 @@ SIGN_ATTEMPTS = 12
 CONDITION_IS = 4  # WFCondition: equals
 
 CHECKLIST_LINE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*)$")
+
+# A whole-line image (`![alt](ref)`) or link (`[name](ref)`). Only treated as a file
+# attachment when `ref` points at a LOCAL file -- a file:// URL or an absolute path -- which
+# is exactly what the reader emits for an attachment, so a read note round-trips. An http(s)
+# link, or anything else, stays ordinary markdown.
+FILE_IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
+FILE_LINK = re.compile(r"^\[([^\]]*)\]\(([^)]+)\)$")
+
+
+def _file_ref(line: str) -> tuple[str, str] | None:
+    """(display name, local path) if the line is a whole-line ref to a local file."""
+    match = FILE_IMAGE.match(line.strip()) or FILE_LINK.match(line.strip())
+    if not match:
+        return None
+    label, ref = match.group(1), match.group(2).strip()
+    if ref.startswith(("http://", "https://")):
+        return None
+    if ref.startswith("file://"):
+        path = unquote(urlparse(ref).path)
+    elif ref.startswith("/"):
+        path = ref
+    else:
+        return None  # relative or scheme-less: not addressable as a file to attach
+    return label or Path(path).name, path
 
 # A table delimiter row, e.g. "| --- | :-: |". Apple's markdown parser needs at least
 # THREE dashes per cell: "| - | - |" is silently left as literal text rather than being
@@ -145,21 +170,60 @@ def _dict_value(source: dict, u: str, key: str) -> dict:
     }
 
 
+def _extension_input() -> dict:
+    """The shortcut's whole input list: item 1 is the JSON payload, items 2..N the files."""
+    return {"Value": {"Type": "ExtensionInput"}, "WFSerializationType": "WFTextTokenAttachment"}
+
+
+def _list_item(source: dict, u: str, specifier: str, index: dict | None = None) -> dict:
+    params = {"UUID": u, "WFInput": source, "WFItemSpecifier": specifier}
+    if index is not None:
+        params["WFItemIndex"] = index
+    return {
+        "WFWorkflowActionIdentifier": "is.workflow.actions.getitemfromlist",
+        "WFWorkflowActionParameters": params,
+    }
+
+
+def _if(group: str, u: str, value: str, compared: dict) -> dict:
+    """Open an `If <compared> is <value>` block."""
+    return {
+        "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
+        "WFWorkflowActionParameters": {
+            "UUID": u,
+            "GroupingIdentifier": group,
+            "WFControlFlowMode": 0,
+            "WFCondition": CONDITION_IS,
+            "WFConditionalActionString": value,
+            "WFInput": {"Type": "Variable", "Variable": compared},
+        },
+    }
+
+
+def _endif(group: str) -> dict:
+    return {
+        "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
+        "WFWorkflowActionParameters": {"UUID": _uid(), "GroupingIdentifier": group,
+                                       "WFControlFlowMode": 2},
+    }
+
+
 def build_workflow() -> dict:
-    u_dict, u_title, u_blocks = _uid(), _uid(), _uid()
+    u_input1, u_dict, u_title, u_blocks = _uid(), _uid(), _uid(), _uid()
     u_note, u_type, u_type_text, u_text, u_rich = _uid(), _uid(), _uid(), _uid(), _uid()
+    u_name, u_n, u_file = _uid(), _uid(), _uid()
     u_checked, u_checked_text, u_item = _uid(), _uid(), _uid()
-    repeat_group, if_group, tick_group = _uid(), _uid(), _uid()
+    repeat_group, cl_group, file_group, md_group, tick_group = (_uid() for _ in range(5))
 
     actions = [
+        # The input is a LIST: item 1 is the JSON payload, items 2..N are attachment files.
+        # Pull item 1 and parse it; the files are fetched by index inside the loop.
+        _list_item(_extension_input(), u_input1, "First Item"),
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.detect.dictionary",
             "WFWorkflowActionParameters": {
                 "UUID": u_dict,
-                "WFInput": {
-                    "Value": {"Type": "ExtensionInput"},
-                    "WFSerializationType": "WFTextTokenAttachment",
-                },
+                "WFInput": _output(u_input1, "Item from List"),
             },
         },
         _dict_value(_output(u_dict, "Dictionary"), u_title, "title"),
@@ -185,6 +249,8 @@ def build_workflow() -> dict:
         },
         _dict_value(_repeat_item(), u_type, "type"),
         _dict_value(_repeat_item(), u_text, "text"),
+        _dict_value(_repeat_item(), u_name, "name"),
+        _dict_value(_repeat_item(), u_n, "n"),
         _dict_value(_repeat_item(), u_checked, "checked"),
         # A Dictionary Value is an untyped value, and the "is" comparison is not valid
         # against one -- Shortcuts shows the operator in red and the run fails with
@@ -197,20 +263,11 @@ def build_workflow() -> dict:
                 "WFTextActionText": _output_as_string(u_type, "Dictionary Value"),
             },
         },
-        # If the block is a checklist item ...
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
-            "WFWorkflowActionParameters": {
-                "GroupingIdentifier": if_group,
-                "WFControlFlowMode": 0,
-                "WFCondition": CONDITION_IS,
-                "WFConditionalActionString": "checklist",
-                "WFInput": {
-                    "Type": "Variable",
-                    "Variable": _output(u_type_text, "Text"),
-                },
-            },
-        },
+        # Three independent Ifs on the block type, rather than nested if/else -- flat
+        # conditionals serialise more reliably, and exactly one matches per block.
+        #
+        # checklist item:
+        _if(cl_group, _uid(), "checklist", _output(u_type_text, "Text")),
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.CreateChecklistItemLinkAction",
             "WFWorkflowActionParameters": {
@@ -220,14 +277,24 @@ def build_workflow() -> dict:
                 "noteEntity": _output(u_note, "Create Note"),
             },
         },
-        # ... otherwise it is prose: markdown -> rich text -> append.
+        _endif(cl_group),
+        # file attachment: fetch the input file this block's `n` names, and add it. The
+        # file rides in as an `-i` input, so its bytes never touch the JSON -- no size cap.
+        _if(file_group, _uid(), "file", _output(u_type_text, "Text")),
+        _list_item(_extension_input(), u_file, "Item At Index", index=_output(u_n, "Dictionary Value")),
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
+            "WFWorkflowActionIdentifier": "com.apple.Notes.AddFileAttachmentLinkAction",
             "WFWorkflowActionParameters": {
-                "GroupingIdentifier": if_group,
-                "WFControlFlowMode": 1,
+                "UUID": _uid(),
+                "AppIntentDescriptor": _notes_intent("AddFileAttachmentLinkAction"),
+                "file": _output(u_file, "Item from List"),
+                "name": _output_as_string(u_name, "Dictionary Value"),
+                "note": _output(u_note, "Create Note"),
             },
         },
+        _endif(file_group),
+        # prose: markdown -> rich text -> append.
+        _if(md_group, _uid(), "markdown", _output(u_type_text, "Text")),
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.getrichtextfrommarkdown",
             "WFWorkflowActionParameters": {
@@ -244,18 +311,9 @@ def build_workflow() -> dict:
                 "WFNote": _output(u_note, "Create Note"),
             },
         },
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
-            "WFWorkflowActionParameters": {
-                "UUID": _uid(),
-                "GroupingIdentifier": if_group,
-                "WFControlFlowMode": 2,
-            },
-        },
-        # Tick the item we just appended, if the block was `- [x]`. This is a SECOND,
-        # sequential If rather than one nested inside the branch above: nesting is more
-        # fragile to serialise, and `checked` is only ever "yes" on a checklist block, so
-        # the item reference can never be stale here.
+        _endif(md_group),
+        # Tick the item we just appended, if the block was `- [x]`. A SECOND, sequential If:
+        # `checked` is only ever "yes" on a checklist block, so the item reference is fresh.
         #
         # "Set Checklist Items Checked" is NOT in the Shortcuts action library -- Apple
         # hides it -- but it is flagged discoverable in Notes' intent metadata and does
@@ -268,19 +326,7 @@ def build_workflow() -> dict:
                 "WFTextActionText": _output_as_string(u_checked, "Dictionary Value"),
             },
         },
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
-            "WFWorkflowActionParameters": {
-                "GroupingIdentifier": tick_group,
-                "WFControlFlowMode": 0,
-                "WFCondition": CONDITION_IS,
-                "WFConditionalActionString": "yes",
-                "WFInput": {
-                    "Type": "Variable",
-                    "Variable": _output(u_checked_text, "Text"),
-                },
-            },
-        },
+        _if(tick_group, _uid(), "yes", _output(u_checked_text, "Text")),
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.SetChecklistItemCheckedLinkActionv2",
             "WFWorkflowActionParameters": {
@@ -291,14 +337,7 @@ def build_workflow() -> dict:
                 "note": _output(u_note, "Create Note"),
             },
         },
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
-            "WFWorkflowActionParameters": {
-                "UUID": _uid(),
-                "GroupingIdentifier": tick_group,
-                "WFControlFlowMode": 2,
-            },
-        },
+        _endif(tick_group),
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
             "WFWorkflowActionParameters": {
@@ -325,16 +364,23 @@ def build_workflow() -> dict:
 
 
 def split_blocks(markdown: str) -> list[dict[str, str]]:
-    """Split markdown into prose blocks and individual checklist items, in order.
+    """Split markdown into prose, checklist items, and file attachments, in order.
 
     A `- [ ]` / `- [x]` line becomes its own checklist block, carrying its ticked state;
-    everything else accumulates into prose blocks. Every block carries a `checked` key
-    ("yes"/"no") because the shortcut reads it unconditionally.
+    a whole-line reference to a local file becomes a `file` block; everything else
+    accumulates into prose blocks. Every block carries a `checked` key ("yes"/"no")
+    because the shortcut reads it unconditionally.
+
+    A file block carries `path` (the local file) and `n`: the 1-based position of that file
+    among the shortcut's inputs. The shortcut is driven as `-i payload.json -i file1 ...`,
+    so input item 1 is the JSON and the files follow -- hence the first file is item 2.
+    `run()` reads `path` out to build that `-i` list and drops it before sending the JSON.
     """
     markdown = _widen_table_delimiters(markdown)
     blocks: list[dict[str, str]] = []
     prose: list[str] = []
     table: list[str] = []
+    file_input_index = 1  # item 1 is the JSON payload; files are numbered from 2
 
     def flush_prose() -> None:
         text = "\n".join(prose).strip()
@@ -354,6 +400,7 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
 
     for line in markdown.splitlines():
         checklist = CHECKLIST_LINE.match(line)
+        file_ref = None if checklist else _file_ref(line)
         is_table_row = line.lstrip().startswith("|")
 
         if is_table_row:
@@ -373,6 +420,20 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
                     "type": "checklist",
                     "text": text,
                     "checked": "yes" if state.lower() == "x" else "no",
+                }
+            )
+        elif file_ref:
+            flush_prose()
+            name, path = file_ref
+            file_input_index += 1
+            blocks.append(
+                {
+                    "type": "file",
+                    "name": name,
+                    "path": path,
+                    "n": str(file_input_index),
+                    "text": "",
+                    "checked": "no",
                 }
             )
         else:
@@ -412,8 +473,30 @@ def is_installed() -> bool:
     return SHORTCUT_NAME in result.stdout.splitlines()
 
 
+def _attachment_paths(blocks: list[dict[str, str]]) -> list[Path]:
+    """The local files a set of blocks references, in `n` order (input item 2, 3, ...).
+
+    Validates each exists and is a regular file BEFORE the shortcut runs, so a bad path is
+    a clean error rather than a note that is created and then only partly populated. The
+    `n` on each block is the shortcut-input index, so sorting by it fixes the `-i` order.
+    """
+    files = sorted((b for b in blocks if b["type"] == "file"), key=lambda b: int(b["n"]))
+    paths: list[Path] = []
+    for block in files:
+        path = Path(block["path"]).expanduser()
+        if not path.is_file():
+            raise BridgeError(f"attachment not found: {block['path']!r}")
+        paths.append(path)
+    return paths
+
+
 def run(title: str, markdown: str, timeout: int = 120) -> None:
-    """Drive the bridge shortcut. Runs headlessly; takes roughly 8s plus per-block time."""
+    """Drive the bridge shortcut. Runs headlessly; takes roughly 8s plus per-block time.
+
+    Attachments in the markdown (whole-line `![](file)` / `[](file)` refs to local files)
+    are passed as additional `-i` inputs, one per file, so the shortcut receives the JSON
+    as input item 1 and each file as the item its block's `n` names.
+    """
     if not is_installed():
         path = generate_signed_shortcut()
         raise BridgeError(
@@ -422,14 +505,23 @@ def run(title: str, markdown: str, timeout: int = 120) -> None:
             "Shortcuts cannot be installed without this one-time confirmation."
         )
 
-    payload = {"title": title, "blocks": split_blocks(markdown)}
+    blocks = split_blocks(markdown)
+    attachments = _attachment_paths(blocks)
+    # `path` is a local filesystem path; it travels as an `-i` input, not in the JSON, so
+    # drop it from the payload (it would otherwise leak the local path into the note input).
+    payload = {"title": title, "blocks": [{k: v for k, v in b.items() if k != "path"} for b in blocks]}
+
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump(payload, fh)
         path = Path(fh.name)
 
+    inputs: list[str] = ["-i", str(path)]
+    for attachment in attachments:
+        inputs += ["-i", str(attachment)]
+
     try:
         result = subprocess.run(
-            ["shortcuts", "run", SHORTCUT_NAME, "-i", str(path)],
+            ["shortcuts", "run", SHORTCUT_NAME, *inputs],
             capture_output=True,
             text=True,
             timeout=timeout,

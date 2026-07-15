@@ -15,12 +15,35 @@ the price of testing the one thing that cannot be faked.
 
 from __future__ import annotations
 
+import re
+import struct
+import zlib
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
 import pytest
 
 from applenotes_mcp import server
 from tests.conftest import LIVE_FOLDER, assert_in_live_folder
 
 pytestmark = pytest.mark.live
+
+
+def _png(width: int = 2, height: int = 2) -> bytes:
+    """A minimal valid PNG, so Notes stores it as a real image attachment."""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(
+            ">I", zlib.crc32(tag + data) & 0xFFFFFFFF
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + bytes([255, 0, 0]) * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
 
 
 # A note that exercises every feature the reader reconstructs. No leading `# title`: the
@@ -122,3 +145,74 @@ def test_edit_preserves_a_checklists_ticked_state(make_note) -> None:
     read_back = server.read_note(old_id)
     new_id = _new_id(server.edit_note(old_id, read_back))
     assert "- [x] keep me ticked" in server.read_note(new_id)
+
+
+# -- attachments (create) ------------------------------------------------------------
+
+
+def test_create_note_attaches_a_local_image_inline(make_note, tmp_path) -> None:
+    """A local-file image ref in the markdown is attached at its position, byte-perfect.
+
+    This exercises the whole write path that reading alone cannot: the file rides in as an
+    extra `-i` input, the shortcut fetches it by index and calls Add File to Note, and it
+    lands between the prose either side of it.
+    """
+    img = tmp_path / "live_probe.png"
+    img.write_bytes(_png())
+    md = f"Before the image.\n\n![live pic]({img.as_uri()})\n\nAfter the image.\n"
+
+    note_id = make_note("with-attachment", md)
+    out = server.read_note(note_id)
+
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    before = next(i for i, ln in enumerate(lines) if ln == "Before the image.")
+    image = next(i for i, ln in enumerate(lines) if ln.startswith("![") and "file://" in ln)
+    after = next(i for i, ln in enumerate(lines) if ln == "After the image.")
+    assert before < image < after, "image was not attached at its inline position"
+
+    stored = Path(unquote(urlparse(re.search(r"\((file://[^)]+)\)", lines[image]).group(1)).path))
+    assert stored.read_bytes() == img.read_bytes(), "attachment bytes differ from source"
+
+
+def test_create_note_rejects_a_missing_attachment(make_note, tmp_path) -> None:
+    # A bad path must fail loudly, not create a half-populated note. (Raised before the
+    # shortcut runs, so nothing is created -- hence not routed through make_note.)
+    from applenotes_mcp import bridge
+
+    missing = tmp_path / "nope.png"
+    with pytest.raises(bridge.BridgeError, match="attachment not found"):
+        server.create_note(
+            title="bad-attachment", markdown=f"![x]({missing})\n", folder=LIVE_FOLDER
+        )
+
+
+# -- attachments (edit) --------------------------------------------------------------
+
+
+def _image_bytes_from(markdown: str) -> bytes:
+    """Read the file behind the first `![...](file://...)` in some read_note output."""
+    url = re.search(r"\((file://[^)]+)\)", markdown).group(1)
+    return Path(unquote(urlparse(url).path)).read_bytes()
+
+
+def test_edit_preserves_an_on_disk_attachment(make_note, tmp_path) -> None:
+    """Editing a note that has an image keeps the image, byte-identical.
+
+    This is the payoff of the create-before-delete ordering: read_note gives a file:// path
+    to the original's Media file, edit_note re-attaches it into the replacement (Notes copies
+    it) while the original still exists, then deletes the original. The copy must survive.
+    """
+    img = tmp_path / "edit_probe.png"
+    img.write_bytes(_png(3, 3))
+    old_id = make_note("edit-attachment", f"Intro.\n\n![pic]({img.as_uri()})\n\nOutro.\n")
+
+    read_back = server.read_note(old_id)
+    assert "](file://" in read_back, "attachment did not read back as a file path"
+
+    new_id = _new_id(server.edit_note(old_id, read_back.replace("Intro.", "EDITED intro.")))
+    out = server.read_note(new_id)
+
+    assert "EDITED intro." in out, "the edit did not take"
+    assert "](file://" in out, "the attachment was dropped by the edit"
+    # Byte-identical, and read AFTER the original note (and its Media file) was deleted.
+    assert _image_bytes_from(out) == img.read_bytes()
