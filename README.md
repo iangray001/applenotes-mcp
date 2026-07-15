@@ -194,6 +194,62 @@ this work:
   hand-built shortcut. It is the only way to write a ticked item, since Append Checklist
   Item has no `checked` parameter.
 
+## Testing
+
+    uv sync            # installs the dev group (pytest)
+    uv run pytest      # the hermetic tiers -- safe, ~0.5s
+
+The suite is in three tiers, because the code has an awkward split: most of the logic is
+pure and trivially testable, but the parts that matter most (`edit_note`) delete real notes
+from a library that syncs to iCloud, where a bug in a *test* could destroy data.
+
+**Tier 1 — pure functions.** `split_blocks`, the table-delimiter widening, the protobuf
+renderer (`_paragraphs`/`_render`/`_inline`), the HTML scraper, and the `edit_note` safety
+invariants driven with fakes (refuses a degraded read, refuses real attachments, backs up
+the *true* markdown, never deletes the note it just created). No Notes, no NoteStore.
+
+**Tier 2 — golden fixtures.** `tests/fixtures/*.zdata` are real note protobufs captured from
+notes Notes itself wrote, paired with the AppleScript HTML and the expected markdown. The
+reader is run against them with no database and no Notes.app anywhere in the loop, so the
+whole read path is pinned deterministically. Regenerate with
+`uv run python tests/capture_fixtures.py`, which writes `.actual` files you promote to
+`.expected` by hand — a captured bug must not be blessed as correct automatically.
+
+Tiers 1 and 2 also carry `tests/test_apple_conversions.py`: assertions about what Apple's
+markdown converter did to our input (`###` flattens to `##`, a bare URL gains a trailing
+slash). A failure there is *news about Apple*, not a regression in this code — and possibly
+a sign that a workaround can be deleted.
+
+**Tier 3 — live round trips** (`tests/test_live.py`, `tests/test_mcp_contract.py`). The one
+property nothing else can check: that a note written by the bridge and read back through the
+protobuf agree, and that reading-then-rewriting reaches a fixed point (`f(f(x)) == f(x)`)
+rather than drifting on every edit. These create and delete real notes, so they are **doubly
+gated** and off by default:
+
+    APPLENOTES_MCP_LIVE=1 uv run pytest -m live
+
+Both gates must be set — the `live` marker is deselected by `pytest` by default, *and* every
+live test is skipped unless `APPLENOTES_MCP_LIVE=1`. The guard rails matter more than the
+assertions they protect:
+
+* everything happens in a dedicated `MCP Live Tests` folder;
+* teardown deletes *scoped to that folder by name*, an AppleScript structurally incapable of
+  reaching a note outside it;
+* the folder must be found **empty at the start**, or the run refuses — a blanket delete may
+  only ever run against a folder we know holds nothing but notes this session created, so a
+  non-empty folder (real notes, or leftovers from a hard-killed run) has to be cleared by
+  hand first;
+* teardown asserts the folder is empty afterwards, so a half-finished cleanup fails loudly.
+
+The MCP contract test is in this file group but is itself hermetic: it spawns the server
+over stdio and snapshots what a client sees — tool names, input schemas, the
+`readOnly`/`destructive` annotations, the server instructions — without touching any note.
+
+Three tests are `xfail(strict=True)`, marking known bugs so the suite tells us the moment
+one is fixed: two are markdown-inside-a-code-fence cases, and one is the attachment
+placeholder misalignment (an image before a table steals the table's slot) that the
+forthcoming attachment work will close.
+
 ## Notes on the Shortcuts CLI, learned the hard way
 
 * `shortcuts sign` requires its **input** file to be named `.shortcut`. A `.plist` is
