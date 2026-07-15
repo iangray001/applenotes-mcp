@@ -1,18 +1,5 @@
 """Read a note's true structure from Notes' own protobuf.
-
-Both of the obvious read paths are lossy, and lose *different* things:
-
-  * AppleScript's HTML cannot see checklists at all -- a ticked box and a plain bullet
-    both come back as <li>text</li> -- and it merges a numbered list into a preceding
-    bullet list.
-  * Apple's "Make Markdown from Rich Text" action destroys tables and flattens headings.
-
-The truth lives in ZICNOTEDATA.ZDATA: a gzipped protobuf holding the note's plain text
-plus a list of attribute runs, each carrying a paragraph style (bullet / numbered /
-checklist, with its `done` flag) and inline formatting. We read it -- read-only, never
-written -- and reconstruct markdown from it.
-
-Verified schema (field numbers confirmed against real notes, not guessed):
+Verified schema:
 
     top.2.3          Note
       .2             note text (string)
@@ -28,10 +15,10 @@ Verified schema (field numbers confirmed against real notes, not guessed):
         .9           link URL (string)
         .12          AttachmentInfo { .2 = type UTI }
 
-Tables are NOT in here: they are separate attachment objects (their content is a CRDT
+Tables are not in here: they are separate attachment objects (their content is a CRDT
 in ZMERGEABLEDATA), and appear in the text only as a U+FFFC placeholder. Rather than
-decode that too, we take the tables from the AppleScript HTML -- which renders them
-faithfully -- and splice them into the placeholders in order.
+decode that too, we take the tables from the AppleScript HTML which renders them
+faithfully and splice them into the placeholders in order.
 """
 
 from __future__ import annotations

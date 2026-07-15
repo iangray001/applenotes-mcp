@@ -1,9 +1,6 @@
 """Convert the HTML Apple Notes hands back via AppleScript into markdown.
 
-This is NO LONGER the primary read path -- see notestore.py, which reconstructs a note
-from Notes' own protobuf and recovers checklists, ticked state and list types that the
-HTML simply does not contain. This module survives for two jobs:
-
+This is not the primary read path (see notestore.py). It does two things:
   * extract_tables(): tables live outside the note protobuf (they are attachment objects
     holding a CRDT), so their content has to come from the HTML, which renders them well.
   * html_to_markdown(): a fallback when the protobuf cannot be read (no Full Disk Access,

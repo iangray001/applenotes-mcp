@@ -1,21 +1,5 @@
 """The Shortcuts bridge: the workflow that writes notes, and the code that drives it.
 
-Why this exists
----------------
-Every Apple Notes MCP server drives Notes via AppleScript's `body` property. That
-path runs the HTML through Notes' importer, which discards the incoming styling and
-bakes explicit inline sizes onto everything (11px body, 15px headings). The result
-overrides the user's own text-size preference and cannot be fixed from Notes' UI,
-which exposes named styles rather than point sizes. Headings arrive as bold spans,
-and tables and checklists are unreachable entirely.
-
-Shortcuts offers a way out. Its `getrichtextfrommarkdown` action produces a genuine
-attributed string, and Notes' `Append to Note` App Intent ingests it natively -- no
-HTML importer involved. Notes written this way carry real <h1>/<h2>, real <ul>/<ol>
-and real table objects, with no font-size pollution.
-
-Structure
----------
 The note is built PIECEWISE. Create Note gives us the note entity, and every
 subsequent action appends to the end of that note, so ordering the appends is what
 positions the content:
@@ -26,10 +10,6 @@ positions the content:
         Otherwise                     -> Make Rich Text from Markdown -> Append to Note
         If block.checked is "yes"     -> Set Checklist Items Checked
 
-Appending to the note directly (rather than accumulating into a variable) also
-avoids a trap: appending rich text to a Shortcuts *variable* coerces it to plain
-text unless the variable was first seeded with an empty rich-text value.
-
 Checklist items are always added to the END of the note by the intent -- but since
 we build the whole note by appending in order, they still land in the right place.
 
@@ -38,8 +18,8 @@ Notes' intent metadata flags it discoverable. It nonetheless resolves and runs i
 hand-built shortcut, and it is the only way to write a TICKED item: Append Checklist
 Item has no `checked` parameter.
 
-Facts about `shortcuts sign`, learned the hard way:
-  * its *input* file must be named `.shortcut`; a `.plist` is rejected outright
+Facts about `shortcuts sign`
+  * its input file must be named `.shortcut`; a `.plist` is rejected outright
   * every action UUID must be unique across the user's whole Shortcuts library
   * it intermittently fails with "Failed to modify some records" on valid input, so
     signing must be retried with generous backoff
