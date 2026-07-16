@@ -15,3 +15,7 @@ wheels/
 .AppleDouble
 .Spotlight-V100
 .Trashes
+
+# others
+*.swp
+
