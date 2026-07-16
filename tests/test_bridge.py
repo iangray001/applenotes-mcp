@@ -10,9 +10,12 @@ from __future__ import annotations
 import pytest
 
 from applenotes_mcp.bridge import (
+    BRIDGE_VERSION,
     BridgeError,
     _attachment_paths,
+    _version_from_actions,
     _widen_table_delimiters,
+    build_workflow,
     file_ref,
     split_blocks,
 )
@@ -153,6 +156,32 @@ def test_a_missing_attachment_is_a_clean_error_before_the_shortcut_runs(tmp_path
     blocks = split_blocks(f"![gone]({tmp_path / 'nope.png'})\n")
     with pytest.raises(BridgeError, match="attachment not found"):
         _attachment_paths(blocks)
+
+
+# -- version stamping ----------------------------------------------------------------
+
+
+def test_the_generated_workflow_stamps_the_current_version() -> None:
+    # What build_workflow writes must be exactly what installed_version reads back, or drift
+    # detection would false-positive on a freshly generated shortcut.
+    actions = build_workflow()["WFWorkflowActions"]
+    assert actions[0]["WFWorkflowActionIdentifier"] == "is.workflow.actions.comment"
+    assert _version_from_actions(actions) == BRIDGE_VERSION
+
+
+def test_a_workflow_with_no_comment_reads_as_version_zero() -> None:
+    # An old, pre-versioning, or hand-made shortcut -- distinct from "cannot read" (None).
+    assert _version_from_actions([{"WFWorkflowActionIdentifier": "is.workflow.actions.gettext"}]) == 0
+
+
+def test_the_version_is_parsed_from_the_comment_text() -> None:
+    actions = [
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.comment",
+            "WFWorkflowActionParameters": {"WFCommentActionText": "applenotes-mcp bridge v7 (x)"},
+        }
+    ]
+    assert _version_from_actions(actions) == 7
 
 
 # -- general -------------------------------------------------------------------------

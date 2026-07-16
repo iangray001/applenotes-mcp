@@ -29,19 +29,30 @@ Facts about `shortcuts sign`
 
 from __future__ import annotations
 
+import io
 import json
 import plistlib
 import re
+import sqlite3
 import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 SHORTCUT_NAME = "Notes MCP Bridge"
 BRIDGE_DIR = Path.home() / ".local" / "share" / "applenotes-mcp"
 SIGN_ATTEMPTS = 12
+
+# Bump whenever build_workflow() changes in a way that an already-imported shortcut would
+# not reflect. The number is written into a Comment action in the workflow (see
+# build_workflow) and read back from the installed shortcut (see installed_version), so a
+# stale import can be detected and the user asked to re-import.
+BRIDGE_VERSION = 1
+_VERSION_RE = re.compile(r"applenotes-mcp bridge v(\d+)")
+SHORTCUTS_DB = Path.home() / "Library" / "Shortcuts" / "Shortcuts.sqlite"
 
 CONDITION_IS = 4  # WFCondition: equals
 
@@ -201,6 +212,17 @@ def build_workflow() -> dict:
     repeat_group, cl_group, file_group, md_group, tick_group = (_uid() for _ in range(5))
 
     actions = [
+        # A leading Comment stamping the version. It does nothing when the shortcut runs;
+        # its only job is to be read back from the installed shortcut so the code can tell
+        # whether the imported copy is the one it expects (see installed_version).
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.comment",
+            "WFWorkflowActionParameters": {
+                "UUID": _uid(),
+                "WFCommentActionText": f"applenotes-mcp bridge v{BRIDGE_VERSION} "
+                "(generated -- do not edit)",
+            },
+        },
         # The input is a LIST: item 1 is the JSON payload, items 2..N are attachment files.
         # Pull item 1 and parse it; the files are fetched by index inside the loop.
         _list_item(_extension_input(), u_input1, "First Item"),
@@ -458,6 +480,50 @@ def is_installed() -> bool:
     return SHORTCUT_NAME in result.stdout.splitlines()
 
 
+def installed_version() -> int | None:
+    """The version stamped in the installed bridge's leading Comment.
+
+    Returns the version integer; 0 if the shortcut is installed and readable but carries no
+    version marker (an old, pre-versioning, or hand-made build); or None if it cannot be
+    determined at all -- the Shortcuts database is missing or unreadable, or its schema has
+    changed. `run` treats None as "cannot tell" and does NOT block on it, so a schema change
+    in a future macOS degrades to the old behaviour rather than refusing every write.
+    """
+    if not SHORTCUTS_DB.exists():
+        return None
+    try:
+        uri = f"file:{SHORTCUTS_DB.as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            row = conn.execute(
+                """
+                SELECT a.ZDATA FROM ZSHORTCUTACTIONS a
+                JOIN ZSHORTCUT s ON s.Z_PK = a.ZSHORTCUT
+                WHERE s.ZNAME = ?
+                """,
+                (SHORTCUT_NAME,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        actions = plistlib.load(io.BytesIO(bytes(row[0])))
+    except Exception:
+        return None
+    return _version_from_actions(actions)
+
+
+def _version_from_actions(actions: list[dict]) -> int:
+    """The version stamped in a workflow's Comment action, or 0 if there is no marker."""
+    for action in actions:
+        if action.get("WFWorkflowActionIdentifier") == "is.workflow.actions.comment":
+            text = action.get("WFWorkflowActionParameters", {}).get("WFCommentActionText", "")
+            match = _VERSION_RE.search(text)
+            if match:
+                return int(match.group(1))
+    return 0
+
+
 def _attachment_paths(blocks: list[dict[str, str]]) -> list[Path]:
     """The local files a set of blocks references, in `n` order (input item 2, 3, ...).
 
@@ -488,6 +554,19 @@ def run(title: str, markdown: str, timeout: int = 120) -> None:
             f"the '{SHORTCUT_NAME}' shortcut is not installed. A signed copy has been "
             f"written to {path} -- open it and click 'Add Shortcut', then retry. "
             "Shortcuts cannot be installed without this one-time confirmation."
+        )
+
+    # The installed shortcut may be an older build than this code expects (the user updated
+    # the server but did not re-import). A None means the version could not be read, which we
+    # do NOT block on -- only a definite mismatch.
+    version = installed_version()
+    if version is not None and version != BRIDGE_VERSION:
+        path = generate_signed_shortcut()
+        raise BridgeError(
+            f"the installed '{SHORTCUT_NAME}' shortcut is out of date (v{version}, this "
+            f"server needs v{BRIDGE_VERSION}). An updated signed copy is at {path} -- delete "
+            "the old shortcut in the Shortcuts app, open this one, click 'Add Shortcut', then "
+            "retry."
         )
 
     blocks = split_blocks(markdown)
