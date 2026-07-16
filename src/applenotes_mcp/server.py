@@ -66,6 +66,11 @@ Writing:
     round trip. Use them for anything list-like the user might tick off.
   * A whole-line `![alt](/local/path)` or `[name](/local/path)` attaches that local file
     (image, PDF, ...) at that point, at any size. An http(s) link stays a link.
+  * Writes are SLOW and SERIALISED: each `create_note`/`edit_note` drives a Shortcuts run
+    taking several seconds, and the server processes them one at a time. Issuing many write
+    calls in a single parallel batch gains no speed -- they just queue, and the later ones
+    may hit the client's tool timeout. Create notes one at a time, waiting for each to
+    return before starting the next.
 
 Editing:
   * `edit_note` is DESTRUCTIVE: Apple offers no in-place rewrite that keeps formatting, so
