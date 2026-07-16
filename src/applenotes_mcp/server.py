@@ -6,18 +6,15 @@ them. Reads go through Notes' own protobuf (notestore.py), which is the only sou
 that knows a checklist from a bullet list. AppleScript is used for what it is good
 at: addressing a note exactly by ID, to fetch its HTML, move it, or delete it.
 
-Editing is delete-and-recreate, not in-place. Shortcuts can only write to a note it
-can *find*, and there is no way to find a specific note: Find Notes' name filter is
-a fuzzy ranked search that returns unrelated notes, its tag filter needs a static
-tag compiled into the shortcut, and a note cannot be tagged programmatically in the
-first place (AppleScript cannot set tags; a #hashtag written into the body stays
-plain text). So `edit_note` reads the old note, deletes it by ID, and recreates it.
+Editing is delete-and-recreate, not in-place. 
+This is because Shortcuts do not provide a reliable/guaranteed way to return a 
+specific note. Searches are fuzzy and can return unrelated notes, and Notes does not 
+seem to allow programmatic tagging of a note in a way that works. Tag filter needs 
+a static tag compiled into the shortcut. A #hashtag written into the body stays
+plain text. So `edit_note` reads the old note, deletes it by ID, and recreates it.
 
-That is safe -- it can never touch the wrong note -- but it is destructive, so it is
-hedged about: every edit backs the original up to BACKUP_DIR first; notes holding
-real attachments (photos, PDFs -- not tables) are refused outright; and if the note's
-true structure cannot be read from NoteStore, the edit is refused rather than run
-from the degraded HTML, which would silently turn checkboxes into plain bullets.
+Edits backs the original up to BACKUP_DIR first (but Notes.app also keeps copies in
+Deleted Items for 30 days so this should all be relatively safe.)
 """
 
 from __future__ import annotations
@@ -45,7 +42,9 @@ from .notestore import (
     folders,
     note_details,
     note_folder,
+    note_id_for_pk,
     read_note_markdown,
+    search_titles,
 )
 
 # Surfaced to the client as server-level guidance. This is for what spans the tools and
@@ -131,7 +130,7 @@ def _promote_title(markdown: str) -> tuple[str, str]:
     lines = markdown.strip().splitlines()
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if not stripped or stripped.startswith("|") or bridge._file_ref(stripped):
+        if not stripped or stripped.startswith("|") or bridge.file_ref(stripped):
             continue
         title = re.sub(r"^#+\s+", "", stripped)  # heading marker
         title = re.sub(r"^[-*]\s+(\[[ xX]\]\s+)?", "", title)  # list / checklist marker
@@ -499,11 +498,11 @@ def _format_search(matches: list[tuple[str, str]], details: dict[int, NoteDetail
     return "\n".join(rows) or "no matches"
 
 
-def _search(field: str, query: str, limit: int) -> str:
-    """Run a `notes whose <field> contains <query>` search and format the enriched rows.
+def _applescript_search(field: str, query: str) -> list[tuple[str, str]]:
+    """`(id, title)` for notes whose <field> contains <query>, via AppleScript.
 
-    `field` is a fixed AppleScript literal (`name` or `plaintext`), never user input, so it
-    is safe to interpolate; only `query` is quoted.
+    `field` is a fixed literal (`name` or `plaintext`), never user input, so it is safe to
+    interpolate; only `query` is quoted.
     """
     raw = _osascript(f"""
         tell application "Notes"
@@ -519,14 +518,24 @@ def _search(field: str, query: str, limit: int) -> str:
         note_id, _, title = line.partition("\t")
         if note_id.strip():
             matches.append((note_id.strip(), title))
-    matches = matches[:limit]
+    return matches
 
+
+def _enrich_and_format(matches: list[tuple[str, str]], limit: int) -> str:
+    """Sort by modification date (newest first), keep `limit`, and format the rows.
+
+    Enrich all matches, THEN sort, THEN cut -- so `limit` really is the most recent N, not
+    the first N the search happened to return.
+    """
     try:
         details = note_details([_note_pk(nid) for nid, _ in matches])
     except NoteStoreError:
         details = {}
-    # Most recently modified first; blank dates (undetermined) sort last.
-    matches.sort(key=lambda m: details.get(_note_pk(m[0]), NoteDetails("", "", "")).modified, reverse=True)
+    matches = sorted(
+        matches,
+        key=lambda m: details.get(_note_pk(m[0]), NoteDetails("", "", "")).modified,
+        reverse=True,
+    )[:limit]
     return _format_search(matches, details)
 
 
@@ -552,7 +561,14 @@ def search_notes(query: str, limit: int = 10) -> str:
     `search_note_text`, which also searches bodies. "no matches" here never means the
     content is absent, only that no title contains `query`.
     """
-    return _search("name", query, limit)
+    # Title search is a pure NoteStore query, so it works even when Notes.app is hung. If the
+    # database cannot be read (no Full Disk Access), fall back to AppleScript, which does not
+    # need it -- enrichment columns just come back blank in that case.
+    try:
+        matches = [(note_id_for_pk(pk), title) for pk, title in search_titles(query)]
+    except NoteStoreError:
+        matches = _applescript_search("name", query)
+    return _enrich_and_format(matches, limit)
 
 
 @mcp.tool(
@@ -572,7 +588,7 @@ def search_note_text(query: str, limit: int = 10) -> str:
     faster. Matching is on the note's plain text, so formatting (checklists, tables) does not
     affect what matches.
     """
-    return _search("plaintext", query, limit)
+    return _enrich_and_format(_applescript_search("plaintext", query), limit)
 
 
 def main() -> None:

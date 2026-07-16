@@ -12,8 +12,8 @@ import pytest
 from applenotes_mcp.bridge import (
     BridgeError,
     _attachment_paths,
-    _file_ref,
     _widen_table_delimiters,
+    file_ref,
     split_blocks,
 )
 
@@ -101,25 +101,25 @@ def test_split_blocks_widens_delimiters_on_the_way_through() -> None:
 
 
 def test_file_ref_recognises_a_file_url() -> None:
-    assert _file_ref("![pic](file:///tmp/a%20b/x.png)") == ("pic", "/tmp/a b/x.png")
+    assert file_ref("![pic](file:///tmp/a%20b/x.png)") == ("pic", "/tmp/a b/x.png")
 
 
 def test_file_ref_recognises_an_absolute_path() -> None:
-    assert _file_ref("[report.pdf](/Users/me/report.pdf)") == ("report.pdf", "/Users/me/report.pdf")
+    assert file_ref("[report.pdf](/Users/me/report.pdf)") == ("report.pdf", "/Users/me/report.pdf")
 
 
 def test_file_ref_uses_the_basename_when_no_label() -> None:
-    assert _file_ref("![](/tmp/photo.jpg)") == ("photo.jpg", "/tmp/photo.jpg")
+    assert file_ref("![](/tmp/photo.jpg)") == ("photo.jpg", "/tmp/photo.jpg")
 
 
 def test_file_ref_ignores_http_links() -> None:
-    assert _file_ref("[site](https://example.com)") is None
+    assert file_ref("[site](https://example.com)") is None
 
 
 def test_file_ref_ignores_relative_and_scheme_less_targets() -> None:
     # Not addressable as a file to attach: a note must reference a real local path.
-    assert _file_ref("[x](docs/x.png)") is None
-    assert _file_ref("plain text") is None
+    assert file_ref("[x](docs/x.png)") is None
+    assert file_ref("plain text") is None
 
 
 def test_a_file_line_becomes_a_file_block_carrying_its_path() -> None:

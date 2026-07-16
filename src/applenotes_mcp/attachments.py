@@ -12,14 +12,11 @@ so they are excluded here by the JOIN on `ZMEDIA`, which they lack.
 
 from __future__ import annotations
 
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-NOTESTORE = (
-    Path.home() / "Library" / "Group Containers" / "group.com.apple.notes" / "NoteStore.sqlite"
-)
+from .notestore import NOTESTORE, NoteStoreError, connect
+
 CONTAINER = NOTESTORE.parent
 
 # For deciding image (`![]`) vs generic file (`[]`) when rendering an attachment. UTI first,
@@ -97,8 +94,7 @@ def note_file_attachments(note_pk: int) -> list[FileAttachment]:
     erroring.
     """
     try:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
+        with connect() as conn:
             rows = conn.execute(
                 """
                 SELECT a.ZIDENTIFIER, a.ZTYPEUTI, m.ZIDENTIFIER, m.ZFILENAME
@@ -108,7 +104,7 @@ def note_file_attachments(note_pk: int) -> list[FileAttachment]:
                 """,
                 (note_pk,),
             ).fetchall()
-    except sqlite3.Error:
+    except NoteStoreError:
         return []
 
     return [

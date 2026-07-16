@@ -55,8 +55,13 @@ FILE_IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 FILE_LINK = re.compile(r"^\[([^\]]*)\]\(([^)]+)\)$")
 
 
-def _file_ref(line: str) -> tuple[str, str] | None:
-    """(display name, local path) if the line is a whole-line ref to a local file."""
+def file_ref(line: str) -> tuple[str, str] | None:
+    """(display name, local path) if the line is a whole-line ref to a local file.
+
+    Public because both the writer (split_blocks, deciding what to attach) and the reader
+    side (server._promote_title, deciding what to skip when deriving a title) need to
+    recognise an attachment line.
+    """
     match = FILE_IMAGE.match(line.strip()) or FILE_LINK.match(line.strip())
     if not match:
         return None
@@ -380,7 +385,7 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
 
     for line in markdown.splitlines():
         checklist = CHECKLIST_LINE.match(line)
-        file_ref = None if checklist else _file_ref(line)
+        ref = None if checklist else file_ref(line)
         is_table_row = line.lstrip().startswith("|")
 
         if is_table_row:
@@ -402,9 +407,9 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
                     "checked": "yes" if state.lower() == "x" else "no",
                 }
             )
-        elif file_ref:
+        elif ref:
             flush_prose()
-            name, path = file_ref
+            name, path = ref
             file_input_index += 1
             blocks.append(
                 {

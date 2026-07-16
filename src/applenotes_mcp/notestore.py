@@ -1,5 +1,14 @@
-"""Read a note's true structure from Notes' own protobuf.
-Verified schema:
+"""Read from Notes' on-disk store, read-only -- the reader half of the server.
+
+Two things live here. First, decoding a single note's content: `ZICNOTEDATA.ZDATA` holds a
+gzipped protobuf of the note's text plus its attribute runs (checklists, list types, inline
+formatting, attachment refs), which `decode`/`_paragraphs`/`_render` turn back into markdown.
+Second, querying the surrounding Core Data tables (all via `connect()`): the folder tree
+(`folders`), a note's folder (`note_folder`), search-result metadata (`note_details`),
+title search (`search_titles`), a folder's contents (`folder_contents`), and the store UUID
+(`_store_uuid`) that lets a note pk be turned back into its `x-coredata` id.
+
+Verified protobuf schema (field numbers confirmed against real notes):
 
     top.2.3          Note
       .2             note text (string)
@@ -13,12 +22,13 @@ Verified schema:
         .3           Font        (a monospaced face means an inline code span)
         .5           font_weight: 1 bold, 2 italic, 3 both
         .9           link URL (string)
-        .12          AttachmentInfo { .2 = type UTI }
+        .12          AttachmentInfo { .1 = identifier (ICAttachment id), .2 = type UTI }
 
-Tables are not in here: they are separate attachment objects (their content is a CRDT
-in ZMERGEABLEDATA), and appear in the text only as a U+FFFC placeholder. Rather than
-decode that too, we take the tables from the AppleScript HTML which renders them
-faithfully and splice them into the placeholders in order.
+Tables are not in the protobuf: they are separate attachment objects (their content is a
+CRDT in ZMERGEABLEDATA), appearing in the text only as a U+FFFC placeholder. Rather than
+decode that too, we take tables from the AppleScript HTML -- which renders them faithfully --
+and splice them into the placeholders in order. Real file attachments (images, PDFs) share
+that placeholder but are resolved to disk separately, in attachments.py.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ from __future__ import annotations
 import gzip
 import re
 import sqlite3
-from contextlib import closing
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +67,26 @@ BOLD, ITALIC = 1, 2
 
 class NoteStoreError(RuntimeError):
     pass
+
+
+@contextmanager
+def connect():
+    """A read-only NoteStore connection, closed on exit.
+
+    Any failure to open it or to run a query on it (the usual cause being no Full Disk
+    Access) is raised as NoteStoreError. Callers that must keep working when the database
+    cannot be read catch NoteStoreError and return a default; callers that cannot proceed
+    let it propagate.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{NOTESTORE.as_posix()}?mode=ro", uri=True)
+        yield conn
+    except sqlite3.Error as exc:
+        raise NoteStoreError(f"cannot read NoteStore (Full Disk Access?): {exc}") from exc
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -130,16 +160,8 @@ def _note_pk(note_id: str) -> int:
 
 
 def _load(note_pk: int) -> tuple[str, list[Run]]:
-    try:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        # closing(), not the connection's own context manager: that one only ends the
-        # transaction, and leaks the handle. This server is long-lived.
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
-            row = conn.execute(
-                "SELECT ZDATA FROM ZICNOTEDATA WHERE ZNOTE = ?", (note_pk,)
-            ).fetchone()
-    except sqlite3.Error as exc:
-        raise NoteStoreError(f"cannot read NoteStore (Full Disk Access?): {exc}") from exc
+    with connect() as conn:
+        row = conn.execute("SELECT ZDATA FROM ZICNOTEDATA WHERE ZNOTE = ?", (note_pk,)).fetchone()
 
     if not row or not row[0]:
         raise NoteStoreError(f"no note data for note {note_pk} (a locked note?)")
@@ -372,21 +394,17 @@ def folders() -> list[Folder]:
         are the main source of apparently-duplicate folder names, so leaving them in makes
         real folders look ambiguous when they are not.
     """
-    try:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
-            rows = conn.execute(
-                """
-                SELECT Z_PK, ZTITLE2, ZPARENT
-                FROM ZICCLOUDSYNCINGOBJECT
-                WHERE ZTITLE2 IS NOT NULL
-                  AND ZFOLDERTYPE = 0
-                  AND ZMARKEDFORDELETION = 0
-                  AND ZNEEDSINITIALFETCHFROMCLOUD = 0
-                """
-            ).fetchall()
-    except sqlite3.Error as exc:
-        raise NoteStoreError(f"cannot read NoteStore (Full Disk Access?): {exc}") from exc
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT Z_PK, ZTITLE2, ZPARENT
+            FROM ZICCLOUDSYNCINGOBJECT
+            WHERE ZTITLE2 IS NOT NULL
+              AND ZFOLDERTYPE = 0
+              AND ZMARKEDFORDELETION = 0
+              AND ZNEEDSINITIALFETCHFROMCLOUD = 0
+            """
+        ).fetchall()
 
     names = {pk: title for pk, title, _ in rows}
     parents = {pk: parent for pk, _, parent in rows}
@@ -421,8 +439,7 @@ def _store_uuid() -> str:
     """
     global _STORE_UUID
     if _STORE_UUID is None:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
+        with connect() as conn:
             row = conn.execute("SELECT Z_UUID FROM Z_METADATA").fetchone()
         if not row or not row[0]:
             raise NoteStoreError("no store UUID in Z_METADATA")
@@ -448,20 +465,16 @@ def folder_contents(folder_pk: int) -> FolderListing:
     """
     subfolders = [f for f in folders() if f.parent == folder_pk]
 
-    try:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
-            rows = conn.execute(
-                """
-                SELECT Z_PK, ZTITLE1, ZMODIFICATIONDATE1, ZSNIPPET
-                FROM ZICCLOUDSYNCINGOBJECT
-                WHERE ZFOLDER = ? AND ZTITLE1 IS NOT NULL AND ZMARKEDFORDELETION = 0
-                ORDER BY ZMODIFICATIONDATE1 DESC
-                """,
-                (folder_pk,),
-            ).fetchall()
-    except sqlite3.Error as exc:
-        raise NoteStoreError(f"cannot read NoteStore (Full Disk Access?): {exc}") from exc
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT Z_PK, ZTITLE1, ZMODIFICATIONDATE1, ZSNIPPET
+            FROM ZICCLOUDSYNCINGOBJECT
+            WHERE ZFOLDER = ? AND ZTITLE1 IS NOT NULL AND ZMARKEDFORDELETION = 0
+            ORDER BY ZMODIFICATIONDATE1 DESC
+            """,
+            (folder_pk,),
+        ).fetchall()
 
     notes = [
         (
@@ -484,8 +497,7 @@ def note_folder(note_id: str) -> Folder | None:
     editing a note quietly moves it to the default folder.
     """
     try:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
+        with connect() as conn:
             row = conn.execute(
                 "SELECT ZFOLDER FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = ?",
                 (_note_pk(note_id),),
@@ -493,7 +505,7 @@ def note_folder(note_id: str) -> Folder | None:
         if not row or not row[0]:
             return None
         return next((f for f in folders() if f.pk == row[0]), None)
-    except (sqlite3.Error, NoteStoreError):
+    except NoteStoreError:
         return None
 
 
@@ -513,10 +525,9 @@ def note_details(pks: list[int]) -> dict[int, NoteDetails]:
     """
     if not pks:
         return {}
+    placeholders = ",".join("?" * len(pks))
     try:
-        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
-        placeholders = ",".join("?" * len(pks))
-        with closing(sqlite3.connect(uri, uri=True)) as conn:
+        with connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT Z_PK, ZFOLDER, ZMODIFICATIONDATE1, ZSNIPPET
@@ -524,7 +535,7 @@ def note_details(pks: list[int]) -> dict[int, NoteDetails]:
                 """,
                 pks,
             ).fetchall()
-    except sqlite3.Error:
+    except NoteStoreError:
         return {}
 
     folder_path = {f.pk: f.path for f in folders()}
@@ -542,6 +553,33 @@ def note_details(pks: list[int]) -> dict[int, NoteDetails]:
             snippet=re.sub(r"\s+", " ", snippet or "").strip()[:80],
         )
     return out
+
+
+def search_titles(query: str) -> list[tuple[int, str]]:
+    """(pk, title) for notes whose title contains `query`, case-insensitively.
+
+    A pure NoteStore title search -- the AppleScript equivalent (`notes whose name
+    contains`) needs Notes.app to be running and answering Apple Events, whereas this keeps
+    working when the app is busy or hung. Recently-Deleted notes are excluded via the folder
+    join: a trashed note keeps its title and often is not itself marked deleted, so filtering
+    on ZMARKEDFORDELETION alone would still surface it.
+    """
+    # Escape LIKE's own wildcards so a query containing % or _ still matches literally.
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with connect() as conn:
+        rows = conn.execute(
+            r"""
+            SELECT n.Z_PK, n.ZTITLE1
+            FROM ZICCLOUDSYNCINGOBJECT n
+            JOIN ZICCLOUDSYNCINGOBJECT f ON f.Z_PK = n.ZFOLDER
+            WHERE n.ZTITLE1 IS NOT NULL
+              AND n.ZMARKEDFORDELETION = 0
+              AND f.ZFOLDERTYPE = 0
+              AND n.ZTITLE1 LIKE ? ESCAPE '\'
+            """,
+            (f"%{escaped}%",),
+        ).fetchall()
+    return [(pk, title) for pk, title in rows]
 
 
 def read_note_markdown(
