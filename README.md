@@ -43,6 +43,7 @@ shortcut makes a `Notes MCP Bridge 2` duplicate rather than replacing it.
 | `search_notes(query)` | Find notes by **title**. Returns `id<TAB>title<TAB>folder<TAB>modified<TAB>snippet`. |
 | `search_note_text(query)` | **Full-text** search over title and body. Same rows as `search_notes`. |
 | `list_folders()` | The folders a note can be filed into, as full paths. |
+| `list_folder(folder)` | Browse one folder: its notes (newest first) and immediate subfolders. |
 
 The tools are annotated (`readOnlyHint`, `destructiveHint`), so a client can prompt for
 `edit_note` while auto-approving the readers, and the server ships `instructions` covering

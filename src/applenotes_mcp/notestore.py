@@ -350,6 +350,7 @@ class Folder:
     pk: int
     name: str
     path: str  # "Personal/Projects/Recipes" -- unique, where `name` may not be
+    parent: int | None = None  # pk of the containing folder, None at the top level
 
 
 def folders() -> list[Folder]:
@@ -402,9 +403,76 @@ def folders() -> list[Folder]:
         return "/".join(reversed(parts))
 
     return sorted(
-        (Folder(pk=pk, name=names[pk], path=path(pk)) for pk in names),
+        (Folder(pk=pk, name=names[pk], path=path(pk), parent=parents.get(pk)) for pk in names),
         key=lambda f: f.path,
     )
+
+
+_STORE_UUID: str | None = None
+
+
+def _store_uuid() -> str:
+    """The Core Data store UUID that note/folder x-coredata IDs are built from.
+
+    It lives in Z_METADATA and is constant for the library, so it is read once and cached.
+    This is what lets a note pk found by a NoteStore query be turned back into the
+    `x-coredata://<uuid>/ICNote/p<pk>` id that read_note and edit_note need, without a round
+    trip through AppleScript.
+    """
+    global _STORE_UUID
+    if _STORE_UUID is None:
+        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            row = conn.execute("SELECT Z_UUID FROM Z_METADATA").fetchone()
+        if not row or not row[0]:
+            raise NoteStoreError("no store UUID in Z_METADATA")
+        _STORE_UUID = row[0]
+    return _STORE_UUID
+
+
+def note_id_for_pk(pk: int) -> str:
+    return f"x-coredata://{_store_uuid()}/ICNote/p{pk}"
+
+
+@dataclass(frozen=True)
+class FolderListing:
+    subfolders: list[Folder]  # direct children only
+    notes: list[tuple[str, str, str, str]]  # (id, title, modified, snippet), newest first
+
+
+def folder_contents(folder_pk: int) -> FolderListing:
+    """The notes and immediate subfolders directly inside a folder.
+
+    Notes come from a NoteStore query (id built from the store UUID), newest first;
+    subfolders are the direct children from `folders()`. Deleted notes are excluded.
+    """
+    subfolders = [f for f in folders() if f.parent == folder_pk]
+
+    try:
+        uri = f"file:{NOTESTORE.as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            rows = conn.execute(
+                """
+                SELECT Z_PK, ZTITLE1, ZMODIFICATIONDATE1, ZSNIPPET
+                FROM ZICCLOUDSYNCINGOBJECT
+                WHERE ZFOLDER = ? AND ZTITLE1 IS NOT NULL AND ZMARKEDFORDELETION = 0
+                ORDER BY ZMODIFICATIONDATE1 DESC
+                """,
+                (folder_pk,),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise NoteStoreError(f"cannot read NoteStore (Full Disk Access?): {exc}") from exc
+
+    notes = [
+        (
+            note_id_for_pk(pk),
+            title,
+            datetime.fromtimestamp(modified + 978307200).strftime("%Y-%m-%d %H:%M") if modified else "",
+            re.sub(r"\s+", " ", snippet or "").strip()[:80],
+        )
+        for pk, title, modified, snippet in rows
+    ]
+    return FolderListing(subfolders=subfolders, notes=notes)
 
 
 def note_folder(note_id: str) -> Folder | None:

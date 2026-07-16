@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from applenotes_mcp import server
-from applenotes_mcp.notestore import Folder, NoteDetails, NoteStoreError
+from applenotes_mcp.notestore import Folder, FolderListing, NoteDetails, NoteStoreError
 
 NOTE_ID = "x-coredata://32CD64CC-0000-0000-0000-000000000000/ICNote/p123"
 
@@ -123,6 +123,26 @@ def test_missing_details_leave_columns_blank_not_broken() -> None:
 
 def test_no_matches_message() -> None:
     assert server._format_search([], {}) == "no matches"
+
+
+# -- folder listing formatting -------------------------------------------------------
+
+
+def test_listing_shows_subfolders_and_notes() -> None:
+    listing = FolderListing(
+        subfolders=[Folder(pk=2, name="Dessert", path="Recipes/Dessert", parent=1)],
+        notes=[(_id(9), "Cookies", "2026-07-01 10:00", "flour")],
+    )
+    out = server._format_listing("Recipes", listing)
+    assert "Folder: Recipes" in out
+    assert "Recipes/Dessert" in out
+    assert f"  {_id(9)}\tCookies\t2026-07-01 10:00\tflour" in out
+
+
+def test_listing_marks_empty_sections() -> None:
+    out = server._format_listing("Empty", FolderListing(subfolders=[], notes=[]))
+    assert "Subfolders (0):" in out and "Notes (0):" in out
+    assert out.count("(none)") == 2
 
 
 # -- title handling ------------------------------------------------------------------

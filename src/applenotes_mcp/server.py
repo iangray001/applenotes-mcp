@@ -37,9 +37,11 @@ from .attachments import unresolved_attachments
 from .html_to_markdown import extract_tables, html_to_markdown
 from .notestore import (
     Folder,
+    FolderListing,
     NoteDetails,
     NoteStoreError,
     _note_pk,
+    folder_contents,
     folders,
     note_details,
     note_folder,
@@ -53,9 +55,9 @@ Apple Notes, with real rich-text formatting: headings, bullet and numbered lists
 tables, and tickable checklists all survive as genuine Notes objects.
 
 Working with note IDs:
-  * A note ID always comes from `search_notes`. Never construct or guess one -- they are
-    Core Data URLs (x-coredata://.../ICNote/p123), and a wrong guess addresses a real but
-    unrelated note.
+  * A note ID always comes from a search (`search_notes`, `search_note_text`) or from
+    `list_folder`. Never construct or guess one -- they are Core Data URLs
+    (x-coredata://.../ICNote/p123), and a wrong guess addresses a real but unrelated note.
   * `search_notes` matches on the TITLE ONLY. To find notes that *mention* something in
     their body, use `search_note_text` (full-text over title and body). Reach for
     `search_notes` when you know the title -- it is faster -- and `search_note_text` when
@@ -265,6 +267,44 @@ def list_folders() -> str:
         for path in sorted(counts)
     ]
     return "\n".join(lines) or "no folders"
+
+
+def _format_listing(path: str, listing: FolderListing) -> str:
+    """Render a folder's immediate subfolders (as paths) and notes (as search-style rows)."""
+    out = [f"Folder: {path}"]
+
+    out.append(f"\nSubfolders ({len(listing.subfolders)}):")
+    out += [f"  {f.path}" for f in listing.subfolders] or ["  (none)"]
+
+    out.append(f"\nNotes ({len(listing.notes)}):")
+    out += [
+        "  " + "\t".join([note_id, title, modified, snippet])
+        for note_id, title, modified, snippet in listing.notes
+    ] or ["  (none)"]
+
+    return "\n".join(out)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List a folder's contents",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+def list_folder(folder: str) -> str:
+    """List the notes and immediate subfolders inside `folder`.
+
+    `folder` is a path (or a name, where unique) as shown by `list_folders`; an ambiguous
+    name is rejected rather than guessed at. Subfolders are given as full paths (pass one
+    back here to descend into it). Notes are listed newest first, one per line, tab-separated
+    as `id`, `title`, `modified` (`YYYY-MM-DD HH:MM`), `snippet` -- the same `id` that
+    `read_note` and `edit_note` take. This is how to browse the library by structure, where
+    `search_notes`/`search_note_text` find notes by their text.
+    """
+    target = _resolve_folder(folder)
+    return _format_listing(target.path, folder_contents(target.pk))
 
 
 @mcp.tool(

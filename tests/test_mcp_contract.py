@@ -50,6 +50,7 @@ def test_exactly_the_expected_tools_are_exposed(contract) -> None:
         "search_notes",
         "search_note_text",
         "list_folders",
+        "list_folder",
     }
 
 
@@ -70,7 +71,7 @@ def test_required_arguments_are_declared(contract) -> None:
 
 def test_read_only_tools_are_annotated_read_only(contract) -> None:
     _, tools = contract
-    for name in ("read_note", "search_notes", "search_note_text", "list_folders"):
+    for name in ("read_note", "search_notes", "search_note_text", "list_folders", "list_folder"):
         assert tools[name].annotations is not None, f"{name} lost its annotations"
         assert tools[name].annotations.readOnlyHint is True
 

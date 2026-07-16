@@ -93,6 +93,16 @@ def test_title_search_finds_by_title_and_full_text_finds_by_body(make_note) -> N
     assert LIVE_FOLDER in row, "search row did not carry the note's folder"
 
 
+def test_list_folder_shows_a_note_it_contains(make_note) -> None:
+    # The note ID in the listing is rebuilt from the store UUID, not returned by AppleScript,
+    # so this also checks that reconstruction produces the same id create_note handed back.
+    note_id = make_note("listing-target", "a body\n")
+    listing = server.list_folder(LIVE_FOLDER)
+    row = next((r.strip() for r in listing.splitlines() if note_id in r), None)
+    assert row is not None, "created note not found in its folder's listing"
+    assert "listing-target" in row
+
+
 def test_read_back_recovers_the_features_that_were_written(make_note) -> None:
     md = server.read_note(make_note("features", RICH_BODY))
 
