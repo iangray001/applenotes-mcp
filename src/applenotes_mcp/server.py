@@ -65,7 +65,9 @@ Writing:
   * `- [ ]` and `- [x]` produce real, tickable checkboxes, and the ticked state survives a
     round trip. Use them for anything list-like the user might tick off.
   * A whole-line `![alt](/local/path)` or `[name](/local/path)` attaches that local file
-    (image, PDF, ...) at that point, at any size. An http(s) link stays a link.
+    (image, PDF, ...) at that point, of any byte size. An http(s) link stays a link. Add a
+    display size with a pipe -- `![alt|small](...)` -- one of small / medium / large; omit
+    it for the default. This round-trips: `read_note` emits the same `|size`.
   * Writes are SLOW and SERIALISED: each `create_note`/`edit_note` drives a Shortcuts run
     taking several seconds, and the server processes them one at a time. Issuing many write
     calls in a single parallel batch gains no speed -- they just queue, and the later ones
@@ -325,7 +327,8 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
 
     Attachments: a whole-line image `![alt](/path/to/file)` or link `[name](/path)` whose
     target is a LOCAL file (an absolute path or a file:// URL) is attached to the note at
-    that point, at any size. An http(s) link stays an ordinary link.
+    that point, of any byte size. An http(s) link stays an ordinary link. A display size may
+    be added after a pipe -- `![alt|small](...)` -- as small, medium or large.
 
     Args:
         title: the note's title -- the bold first line Apple shows in the notes list, not

@@ -15,9 +15,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .notestore import NOTESTORE, NoteStoreError, connect
+from .notestore import NOTESTORE, NoteStoreError, _first, connect
 
 CONTAINER = NOTESTORE.parent
+
+# An attachment's display size lives in ZMERGEABLEPREFERREDVIEWSIZE, a small protobuf whose
+# field 2 -> field 1 is the size value. Absent (NULL) means the default size. The values are
+# not sequential -- these were read back from notes written at each size via the Set
+# Attachment Size intent (small=2, medium=4, large=0; 0 is a real value, distinct from NULL).
+_VIEW_SIZE_BY_VALUE = {2: "small", 4: "medium", 0: "large"}
+
+
+def _decode_view_size(blob: bytes | None) -> str | None:
+    """The display-size name in a ZMERGEABLEPREFERREDVIEWSIZE blob, or None for default."""
+    if not blob:
+        return None
+    inner = _first(bytes(blob), 2)
+    return _VIEW_SIZE_BY_VALUE.get(_first(inner, 1)) if inner is not None else None
 
 # For deciding image (`![]`) vs generic file (`[]`) when rendering an attachment. UTI first,
 # with a filename-extension fallback for the odd attachment that carries no/again UTI.
@@ -68,8 +82,12 @@ def _is_image(uti: str | None, path: Path) -> bool:
     return (uti in IMAGE_UTIS) or (path.suffix.lower() in IMAGE_EXTS)
 
 
-def _attachment_markdown(uti: str | None, filename: str | None, path: Path | None) -> str:
-    name = filename or "attachment"
+def _attachment_markdown(
+    uti: str | None, filename: str | None, path: Path | None, size: str | None = None
+) -> str:
+    # A non-default display size rides in the label after a pipe (`name|small`), which
+    # file_ref parses back on a write, so the size round-trips.
+    name = f"{filename or 'attachment'}|{size}" if size else (filename or "attachment")
     if path is None:
         # Present in the note, but not on disk (not downloaded from iCloud, say). Emit a
         # visible marker rather than a broken link to a path that does not exist.
@@ -84,6 +102,7 @@ class FileAttachment:
     uti: str | None
     filename: str | None
     path: Path | None  # the file on disk, or None if it is not present locally
+    size: str | None = None  # display size (small/medium/large), None for default
 
 
 def note_file_attachments(note_pk: int) -> list[FileAttachment]:
@@ -97,7 +116,8 @@ def note_file_attachments(note_pk: int) -> list[FileAttachment]:
         with connect() as conn:
             rows = conn.execute(
                 """
-                SELECT a.ZIDENTIFIER, a.ZTYPEUTI, m.ZIDENTIFIER, m.ZFILENAME
+                SELECT a.ZIDENTIFIER, a.ZTYPEUTI, m.ZIDENTIFIER, m.ZFILENAME,
+                       a.ZMERGEABLEPREFERREDVIEWSIZE
                 FROM ZICCLOUDSYNCINGOBJECT a
                 JOIN ZICCLOUDSYNCINGOBJECT m ON m.Z_PK = a.ZMEDIA
                 WHERE a.ZNOTE = ?
@@ -108,8 +128,8 @@ def note_file_attachments(note_pk: int) -> list[FileAttachment]:
         return []
 
     return [
-        FileAttachment(att_id, uti, filename, _media_path(media_id, filename))
-        for att_id, uti, media_id, filename in rows
+        FileAttachment(att_id, uti, filename, _media_path(media_id, filename), _decode_view_size(vs))
+        for att_id, uti, media_id, filename, vs in rows
         if att_id
     ]
 
@@ -121,7 +141,7 @@ def note_media(note_pk: int) -> dict[str, str]:
     can look each placeholder up by the identifier it already has.
     """
     return {
-        a.identifier: _attachment_markdown(a.uti, a.filename, a.path)
+        a.identifier: _attachment_markdown(a.uti, a.filename, a.path, a.size)
         for a in note_file_attachments(note_pk)
     }
 

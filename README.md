@@ -61,10 +61,9 @@ recreates it through the bridge. It will not touch the wrong note, but:
 * the note gets a **new ID and a new creation date**
 * this will also mess with Shared Notes
 
-If the note's structure cannot be properly read from NoteStore then the edit is 
-**refused** rather than run from the degraded HTML.
-
-Every edit writes a JSON backup to `~/.local/share/applenotes-mcp/backups/` first, and 
+If the note's structure cannot otherwise be properly read from NoteStore then the edit is 
+**refused** rather than run from the degraded HTML. Still, every edit writes a JSON 
+backup to `~/.local/share/applenotes-mcp/backups/` first, and 
 the original also lands in Notes' Recently Deleted for 30 days.
 
 **Heading depth is flattened below level 3.** Apple's markdown converter maps `#` to Notes'
@@ -74,6 +73,9 @@ never emits it so `### Foo` reads back as `## Foo`.
 
 **Links gain a trailing slash.** Notes.app normalises a bare-host URL, so
 `https://example.com` comes back as `https://example.com/`.
+
+**Any highlighted text will revert back to normal text.** It is possible to read the highlighting
+out of the note store, but there is no way through either Shortcuts or HTML to write a highlight.
 
 
 ## Testing

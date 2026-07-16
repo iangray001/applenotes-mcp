@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from applenotes_mcp.attachments import _attachment_markdown, _is_image
+from applenotes_mcp.attachments import _attachment_markdown, _decode_view_size, _is_image
 from applenotes_mcp.notestore import decode, _paragraphs, _render
 from applenotes_mcp.html_to_markdown import extract_tables
 
@@ -46,6 +46,27 @@ def test_an_image_renders_as_an_image() -> None:
 def test_a_file_renders_as_a_link() -> None:
     md = _attachment_markdown("com.adobe.pdf", "report.pdf", Path("/tmp/report.pdf"))
     assert md == "[report.pdf](file:///tmp/report.pdf)"
+
+
+def test_a_display_size_renders_in_the_pipe_form() -> None:
+    # `name|size` -- exactly what file_ref parses back, so the size round-trips.
+    md = _attachment_markdown("public.png", "pic.png", Path("/tmp/pic.png"), "small")
+    assert md == "![pic.png|small](file:///tmp/pic.png)"
+
+
+def test_no_size_renders_plainly() -> None:
+    assert _attachment_markdown("public.png", "p.png", Path("/tmp/p.png")) == "![p.png](file:///tmp/p.png)"
+
+
+def test_decode_view_size_reads_the_blob() -> None:
+    # Values read back from real notes: small=2, medium=4, large=0 (field 2 -> {field 1 = v}).
+    assert _decode_view_size(bytes.fromhex("099207ee3db704c841120208 02".replace(" ", ""))) == "small"
+    assert _decode_view_size(bytes.fromhex("12020802")) == "small"
+    assert _decode_view_size(bytes.fromhex("12020804")) == "medium"
+    # large is value 0 -- a real size, NOT the same as an absent blob (which is default).
+    assert _decode_view_size(bytes.fromhex("12020800")) == "large"
+    assert _decode_view_size(None) is None
+    assert _decode_view_size(b"") is None
 
 
 def test_spaces_in_the_path_are_percent_encoded() -> None:

@@ -211,6 +211,29 @@ def test_create_note_attaches_a_local_image_inline(make_note, tmp_path) -> None:
     assert stored.read_bytes() == img.read_bytes(), "attachment bytes differ from source"
 
 
+@pytest.mark.parametrize("size", ["small", "medium", "large"])
+def test_a_display_size_round_trips(make_note, tmp_path, size) -> None:
+    """`![name|size](file)` sets that display size, and reads back as the same `|size`.
+
+    Also proves the read-side value map (ZMERGEABLEPREFERREDVIEWSIZE -> size name) matches
+    what the Set Attachment Size intent writes for each case.
+    """
+    img = tmp_path / f"{size}.png"
+    img.write_bytes(_png())
+    note_id = make_note(f"sized-{size}", f"![pic|{size}]({img.as_uri()})\n")
+    out = server.read_note(note_id)
+    assert f"|{size}]" in out, f"{size} did not round-trip; got: {out!r}"
+
+
+def test_no_size_reads_back_without_a_pipe(make_note, tmp_path) -> None:
+    img = tmp_path / "plain.png"
+    img.write_bytes(_png())
+    note_id = make_note("sized-default", f"![pic]({img.as_uri()})\n")
+    out = server.read_note(note_id)
+    image_line = next(ln for ln in out.splitlines() if ln.startswith("![") and "file://" in ln)
+    assert "|" not in image_line.split("](", 1)[0], "default size should have no pipe"
+
+
 def test_create_note_rejects_a_missing_attachment(make_note, tmp_path) -> None:
     # A bad path must fail loudly, not create a half-populated note. (Raised before the
     # shortcut runs, so nothing is created -- hence not routed through make_note.)

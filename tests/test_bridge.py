@@ -104,15 +104,25 @@ def test_split_blocks_widens_delimiters_on_the_way_through() -> None:
 
 
 def test_file_ref_recognises_a_file_url() -> None:
-    assert file_ref("![pic](file:///tmp/a%20b/x.png)") == ("pic", "/tmp/a b/x.png")
+    assert file_ref("![pic](file:///tmp/a%20b/x.png)") == ("pic", "/tmp/a b/x.png", None)
 
 
 def test_file_ref_recognises_an_absolute_path() -> None:
-    assert file_ref("[report.pdf](/Users/me/report.pdf)") == ("report.pdf", "/Users/me/report.pdf")
+    assert file_ref("[report.pdf](/Users/me/report.pdf)") == ("report.pdf", "/Users/me/report.pdf", None)
 
 
 def test_file_ref_uses_the_basename_when_no_label() -> None:
-    assert file_ref("![](/tmp/photo.jpg)") == ("photo.jpg", "/tmp/photo.jpg")
+    assert file_ref("![](/tmp/photo.jpg)") == ("photo.jpg", "/tmp/photo.jpg", None)
+
+
+def test_file_ref_parses_a_pipe_display_size() -> None:
+    assert file_ref("![photo|small](/tmp/x.png)") == ("photo", "/tmp/x.png", "small")
+    assert file_ref("[doc|large](/tmp/x.pdf)") == ("doc", "/tmp/x.pdf", "large")
+
+
+def test_file_ref_ignores_an_unknown_size_keeping_it_in_the_name() -> None:
+    # A pipe that is not a real size is just part of the label, not a size directive.
+    assert file_ref("![a|b|huge](/tmp/x.png)") == ("a|b|huge", "/tmp/x.png", None)
 
 
 def test_file_ref_ignores_http_links() -> None:
@@ -130,6 +140,12 @@ def test_a_file_line_becomes_a_file_block_carrying_its_path() -> None:
     assert block["type"] == "file"
     assert block["path"] == "/tmp/x.png"
     assert block["name"] == "pic"
+    assert block["size"] == ""  # no size -> default
+
+
+def test_a_sized_file_block_carries_its_size() -> None:
+    (block,) = split_blocks("![pic|small](/tmp/x.png)\n")
+    assert block["name"] == "pic" and block["size"] == "small"
 
 
 def test_files_are_numbered_from_input_item_2_in_document_order() -> None:

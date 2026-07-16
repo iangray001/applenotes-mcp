@@ -50,7 +50,7 @@ SIGN_ATTEMPTS = 12
 # not reflect. The number is written into a Comment action in the workflow (see
 # build_workflow) and read back from the installed shortcut (see installed_version), so a
 # stale import can be detected and the user asked to re-import.
-BRIDGE_VERSION = 1
+BRIDGE_VERSION = 2
 _VERSION_RE = re.compile(r"applenotes-mcp bridge v(\d+)")
 SHORTCUTS_DB = Path.home() / "Library" / "Shortcuts" / "Shortcuts.sqlite"
 
@@ -66,12 +66,18 @@ FILE_IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 FILE_LINK = re.compile(r"^\[([^\]]*)\]\(([^)]+)\)$")
 
 
-def file_ref(line: str) -> tuple[str, str] | None:
-    """(display name, local path) if the line is a whole-line ref to a local file.
+# Attachment display sizes settable via the Notes "Set Attachment Size" intent. "default"
+# is the absence of a size (no `|size` suffix), so it never needs the intent.
+ATTACHMENT_SIZES = {"small", "medium", "large"}
 
-    Public because both the writer (split_blocks, deciding what to attach) and the reader
-    side (server._promote_title, deciding what to skip when deriving a title) need to
-    recognise an attachment line.
+
+def file_ref(line: str) -> tuple[str, str, str | None] | None:
+    """(display name, local path, size) if the line is a whole-line ref to a local file.
+
+    The label may carry a trailing display size after a pipe -- `![photo|small](...)` -- one
+    of small / medium / large; `size` is None otherwise. Public because both the writer
+    (split_blocks) and the reader side (server._promote_title) need to recognise an
+    attachment line.
     """
     match = FILE_IMAGE.match(line.strip()) or FILE_LINK.match(line.strip())
     if not match:
@@ -85,7 +91,13 @@ def file_ref(line: str) -> tuple[str, str] | None:
         path = ref
     else:
         return None  # relative or scheme-less: not addressable as a file to attach
-    return label or Path(path).name, path
+
+    size = None
+    if "|" in label:
+        head, tail = label.rsplit("|", 1)
+        if tail.strip().lower() in ATTACHMENT_SIZES:
+            label, size = head, tail.strip().lower()
+    return label or Path(path).name, path, size
 
 # A table delimiter row, e.g. "| --- | :-: |". Apple's markdown parser needs at least
 # THREE dashes per cell: "| - | - |" is silently left as literal text rather than being
@@ -207,9 +219,11 @@ def _endif(group: str) -> dict:
 def build_workflow() -> dict:
     u_input1, u_dict, u_title, u_blocks = _uid(), _uid(), _uid(), _uid()
     u_note, u_type, u_type_text, u_text, u_rich = _uid(), _uid(), _uid(), _uid(), _uid()
-    u_name, u_n, u_file = _uid(), _uid(), _uid()
+    u_name, u_n, u_file, u_add = _uid(), _uid(), _uid(), _uid()
+    u_size, u_size_text = _uid(), _uid()
     u_checked, u_checked_text, u_item = _uid(), _uid(), _uid()
     repeat_group, cl_group, file_group, md_group, tick_group = (_uid() for _ in range(5))
+    size_groups = {s: _uid() for s in ("small", "medium", "large")}
 
     actions = [
         # A leading Comment stamping the version. It does nothing when the shortcut runs;
@@ -258,6 +272,7 @@ def build_workflow() -> dict:
         _dict_value(_repeat_item(), u_text, "text"),
         _dict_value(_repeat_item(), u_name, "name"),
         _dict_value(_repeat_item(), u_n, "n"),
+        _dict_value(_repeat_item(), u_size, "size"),
         _dict_value(_repeat_item(), u_checked, "checked"),
         # A Dictionary Value is an untyped value, and the "is" comparison is not valid
         # against one -- Shortcuts shows the operator in red and the run fails with
@@ -292,7 +307,7 @@ def build_workflow() -> dict:
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.AddFileAttachmentLinkAction",
             "WFWorkflowActionParameters": {
-                "UUID": _uid(),
+                "UUID": u_add,
                 "AppIntentDescriptor": _notes_intent("AddFileAttachmentLinkAction"),
                 "file": _output(u_file, "Item from List"),
                 "name": _output_as_string(u_name, "Dictionary Value"),
@@ -345,6 +360,35 @@ def build_workflow() -> dict:
             },
         },
         _endif(tick_group),
+        # Set the attachment's display size, if the file block asked for one. Independent
+        # Ifs, like the tick above: `size` is only ever small/medium/large on a file block,
+        # and AddFileAttachment (u_add) ran earlier in this same iteration, so its output is
+        # the attachment we just added. One If per size because the enum parameter takes a
+        # literal case string ("small"), the same way SetChecklistItemChecked takes "check".
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+            "WFWorkflowActionParameters": {
+                "UUID": u_size_text,
+                "WFTextActionText": _output_as_string(u_size, "Dictionary Value"),
+            },
+        },
+        *[
+            action
+            for size, group in size_groups.items()
+            for action in (
+                _if(group, _uid(), size, _output(u_size_text, "Text")),
+                {
+                    "WFWorkflowActionIdentifier": "com.apple.Notes.SetAttachmentSizeLinkAction",
+                    "WFWorkflowActionParameters": {
+                        "UUID": _uid(),
+                        "AppIntentDescriptor": _notes_intent("SetAttachmentSizeLinkAction"),
+                        "target": _output(u_add, "Add File to Note"),
+                        "attachmentSize": size,
+                    },
+                },
+                _endif(group),
+            )
+        ],
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
             "WFWorkflowActionParameters": {
@@ -431,7 +475,7 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
             )
         elif ref:
             flush_prose()
-            name, path = ref
+            name, path, size = ref
             file_input_index += 1
             blocks.append(
                 {
@@ -439,6 +483,7 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
                     "name": name,
                     "path": path,
                     "n": str(file_input_index),
+                    "size": size or "",  # "" = default; the shortcut sets a size only if set
                     "text": "",
                     "checked": "no",
                 }
