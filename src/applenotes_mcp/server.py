@@ -130,10 +130,20 @@ def _note_field(note_id: str, field: str) -> str:
 
 
 def _ids_with_title(title: str) -> set[str]:
+    """Ids of notes whose title matches `title`, used to spot the one the bridge just made.
+
+    Match on a PREFIX of the first line, not the exact title. Notes stores a note's `name`
+    as its first line, truncated (to ~64 chars plus an ellipsis) once it is long enough, so
+    `name is <title>` misses any long or multi-line title -- which made create_note fail to
+    find the note it had just created and, because that raised before the folder move,
+    strand it in the default folder. The first 40 characters always survive, and
+    `_create_and_identify`'s before/after diff still pins the note uniquely.
+    """
+    prefix = (title.splitlines() or [""])[0][:40]
     raw = _osascript(f"""
         tell application "Notes"
             set out to ""
-            repeat with n in (notes whose name is {_as_str(title)})
+            repeat with n in (notes whose name begins with {_as_str(prefix)})
                 set out to out & (id of n) & linefeed
             end repeat
             return out

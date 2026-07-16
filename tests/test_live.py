@@ -75,6 +75,15 @@ def test_a_created_note_is_filed_into_the_requested_folder(make_note) -> None:
     assert_in_live_folder(note_id)  # reads the folder back from NoteStore, not a guess
 
 
+def test_a_long_title_is_still_found_and_filed(make_note) -> None:
+    # Regression: Notes truncates a note's `name` (its first line) once long enough, so the
+    # exact-title lookup used to verify creation returned 0 -- which raised before the folder
+    # move and stranded the note in the default folder. A long title must still land here.
+    long_title = "Weekly Team Sync Notes and Action Items for the Quarterly Planning Review " + ("x" * 60)
+    note_id = make_note(long_title, "body\n")
+    assert_in_live_folder(note_id)
+
+
 # -- search --------------------------------------------------------------------------
 
 
