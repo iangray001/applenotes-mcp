@@ -1,20 +1,6 @@
 """MCP server for Apple Notes that writes properly formatted notes.
 
-Writes go through Shortcuts (bridge.py), which is the only route that produces real
-headings, lists, tables and checklists; AppleScript's `body` setter mangles all of
-them. Reads go through Notes' own protobuf (notestore.py), which is the only source
-that knows a checklist from a bullet list. AppleScript is used for what it is good
-at: addressing a note exactly by ID, to fetch its HTML, move it, or delete it.
-
-Editing is delete-and-recreate, not in-place. 
-This is because Shortcuts do not provide a reliable/guaranteed way to return a 
-specific note. Searches are fuzzy and can return unrelated notes, and Notes does not 
-seem to allow programmatic tagging of a note in a way that works. Tag filter needs 
-a static tag compiled into the shortcut. A #hashtag written into the body stays
-plain text. So `edit_note` reads the old note, deletes it by ID, and recreates it.
-
-Edits backs the original up to BACKUP_DIR first (but Notes.app also keeps copies in
-Deleted Items for 30 days so this should all be relatively safe.)
+For implementation details and design rationale, see NOTES.md
 """
 
 from __future__ import annotations
