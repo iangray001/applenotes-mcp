@@ -77,6 +77,14 @@ never emits it so `### Foo` reads back as `## Foo`.
 **Any highlighted text will revert back to normal text.** It is possible to read the highlighting
 out of the note store, but there is no way through either Shortcuts or HTML to write a highlight.
 
+**Attachments show as "PDF Document" (or "Image", etc.), not a title.** Notes shows the tile
+title from an attachment's `ZTITLE` field, which it only populates when you add a file through
+its own UI. Nothing in the automation surface can set it: the *Add File to Note* intent leaves
+it empty (its `name` parameter sets only the media filename, which Notes does not display),
+there is no rename intent, the attachment entity's name is not writable, and AppleScript cannot
+even see intent-created attachments. Attachment display size, by contrast, *is* settable — so
+label attachments by the surrounding note text.
+
 
 ## Testing
 

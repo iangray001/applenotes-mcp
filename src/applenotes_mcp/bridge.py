@@ -1,30 +1,10 @@
 """The Shortcuts bridge: the workflow that writes notes, and the code that drives it.
 
-The note is built PIECEWISE. Create Note gives us the note entity, and every
-subsequent action appends to the end of that note, so ordering the appends is what
-positions the content:
+The note is built chunk by chunk. Create Note returns the note entity, and every
+subsequent action appends to the end of that note, so ordering the appends
+positions the content.
 
-    Create Note (title)
-    Repeat with each block:
-        If block.type is "checklist"  -> Append Checklist Item
-        Otherwise                     -> Make Rich Text from Markdown -> Append to Note
-        If block.checked is "yes"     -> Set Checklist Items Checked
-
-Checklist items are always added to the END of the note by the intent -- but since
-we build the whole note by appending in order, they still land in the right place.
-
-"Set Checklist Items Checked" does NOT appear in the Shortcuts action library, though
-Notes' intent metadata flags it discoverable. It nonetheless resolves and runs in a
-hand-built shortcut, and it is the only way to write a TICKED item: Append Checklist
-Item has no `checked` parameter.
-
-Facts about `shortcuts sign`
-  * its input file must be named `.shortcut`; a `.plist` is rejected outright
-  * every action UUID must be unique across the user's whole Shortcuts library
-  * it intermittently fails with "Failed to modify some records" on valid input, so
-    signing must be retried with generous backoff
-  * it does NOT validate action identifiers -- a bogus one signs happily and only
-    shows up as a broken action after import
+Gotchas and rationale are detailed in NOTES.md.
 """
 
 from __future__ import annotations
@@ -58,8 +38,8 @@ CONDITION_IS = 4  # WFCondition: equals
 
 CHECKLIST_LINE = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*)$")
 
-# A whole-line image (`![alt](ref)`) or link (`[name](ref)`). Only treated as a file
-# attachment when `ref` points at a LOCAL file -- a file:// URL or an absolute path -- which
+# A whole-line image ![alt](ref) or link [name](ref). Only treated as a file
+# attachment when ref points at a LOCAL file - a file:// URL or an absolute path - which
 # is exactly what the reader emits for an attachment, so a read note round-trips. An http(s)
 # link, or anything else, stays ordinary markdown.
 FILE_IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
@@ -74,8 +54,9 @@ ATTACHMENT_SIZES = {"small", "medium", "large"}
 def file_ref(line: str) -> tuple[str, str, str | None] | None:
     """(display name, local path, size) if the line is a whole-line ref to a local file.
 
-    The label may carry a trailing display size after a pipe -- `![photo|small](...)` -- one
-    of small / medium / large; `size` is None otherwise. Public because both the writer
+    The label may carry a trailing display size after a pipe:
+        ![photo|small](...)
+    This would be {small, medium, large}, size is None otherwise. Public because both the writer
     (split_blocks) and the reader side (server._promote_title) need to recognise an
     attachment line.
     """
@@ -101,8 +82,8 @@ def file_ref(line: str) -> tuple[str, str, str | None] | None:
 
 # A table delimiter row, e.g. "| --- | :-: |". Apple's markdown parser needs at least
 # THREE dashes per cell: "| - | - |" is silently left as literal text rather than being
-# turned into a table, with no error. GFM permits a single dash, so hand-written markdown
-# hits this regularly.
+# turned into a table, with no error. GFM permits a single dash so hand-written markdown
+# is likely to trigger this.
 TABLE_DELIMITER = re.compile(r"^\s*\|(?:\s*:?-+:?\s*\|)+\s*$")
 
 
@@ -217,12 +198,14 @@ def _endif(group: str) -> dict:
 
 
 def build_workflow() -> dict:
-    u_input1, u_dict, u_title, u_blocks = _uid(), _uid(), _uid(), _uid()
-    u_note, u_type, u_type_text, u_text, u_rich = _uid(), _uid(), _uid(), _uid(), _uid()
-    u_name, u_n, u_file, u_add = _uid(), _uid(), _uid(), _uid()
-    u_size, u_size_text = _uid(), _uid()
-    u_checked, u_checked_text, u_item = _uid(), _uid(), _uid()
-    repeat_group, cl_group, file_group, md_group, tick_group = (_uid() for _ in range(5))
+    # The shortcut will fail to sign if UUIDs are not globally unique so we need a bunch
+    u_input1, u_dict, u_title, u_blocks, \
+    u_note, u_type, u_type_text, u_text, u_rich, \
+    u_name, u_n, u_file, u_add, \
+    u_size, u_size_text, \
+    u_checked, u_checked_text, u_item, \
+    repeat_group, cl_group, file_group, md_group, tick_group \
+        = (_uid() for _ in range(23))
     size_groups = {s: _uid() for s in ("small", "medium", "large")}
 
     actions = [
@@ -285,8 +268,8 @@ def build_workflow() -> dict:
                 "WFTextActionText": _output_as_string(u_type, "Dictionary Value"),
             },
         },
-        # Three independent Ifs on the block type, rather than nested if/else -- flat
-        # conditionals serialise more reliably, and exactly one matches per block.
+        # Three independent Ifs on the block type rather than nested if/else, 
+        # exactly one matches per block.
         #
         # checklist item:
         _if(cl_group, _uid(), "checklist", _output(u_type_text, "Text")),

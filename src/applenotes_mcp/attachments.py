@@ -1,13 +1,12 @@
 """Resolve a note's file attachments (photos, PDFs) to their files on disk.
 
 An attachment appears in the note protobuf only as a placeholder carrying its identifier
-and type UTI. The identifier joins, in Notes' own database, to a media row (`ZMEDIA`) whose
-filename locates the file under `<container>/Media/`. We read that database read-only, never
-writing to it -- it is Core Data with CloudKit sync state alongside, and writing to it out
-from under a running Notes.app is a reliable way to corrupt a user's notes.
+and type UTI. The identifier joins, in Notes' own database, to a media row (ZMEDIA) whose
+filename locates the file under <container>/Media/. We read that database read-only, never
+writing to it.
 
-Tables are not files -- their content is a CRDT, spliced from the AppleScript HTML instead --
-so they are excluded here by the JOIN on `ZMEDIA`, which they lack.
+Tables are not files - their content is a CRDT which we splice from the AppleScript HTML. 
+They are excluded here by the JOIN on ZMEDIA.
 """
 
 from __future__ import annotations
