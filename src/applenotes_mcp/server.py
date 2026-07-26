@@ -194,8 +194,8 @@ def _resolve_folder(folder: str) -> Folder:
 
     if not matches:
         raise ValueError(
-            f"no folder named {folder!r}. This server does not create folders; make it "
-            "in Notes first. Call list_folders to see what exists."
+            f"no folder named {folder!r}. Call list_folders to see what exists, or "
+            "create_folder to make this one (it creates any missing parents), then retry."
         )
     if len({f.path for f in matches}) > 1:
         paths = ", ".join(sorted(f.path for f in matches))
@@ -255,8 +255,9 @@ def _backup(note_id: str, title: str, html: str, markdown: str) -> Path:
 def list_folders() -> str:
     """List the folders a note can be filed into, as full paths, one per line.
 
-    `create_note` can only file a note into a folder that already exists -- this server
-    never creates one -- so call this rather than guessing a folder name.
+    `create_note` can only file a note into a folder that already exists -- it never creates
+    one -- so call this rather than guessing a folder name. To file into a folder that is not
+    listed here, call `create_folder` first.
 
     Paths are shown because folder names are NOT unique: nesting allows both
     "Personal/Recipes" and "Personal/Projects/Brewing/Recipes". Pass the full path to

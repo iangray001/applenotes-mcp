@@ -58,6 +58,13 @@ store UUID, so the note's own ID yields the folder's —
 `edit_note` re-files by ID too, so a note living in one of two same-named folders goes back
 to the one it came from.
 
+`create_folder` walks a path segment by segment, finding the longest prefix that already
+exists and creating only what is missing beneath it, each new folder made `at folder id` of
+the one before. It is deliberately a separate tool rather than an auto-create inside
+`create_note`: `create_note` still **refuses** an unknown folder, so a mistyped name files
+nothing by surprise, and making a folder stays an explicit act. A prefix that is itself
+ambiguous is refused, since there would be no way to say which of them to nest under.
+
 The folder list is read from NoteStore rather than AppleScript, because three things have to
 be filtered out to match what Notes.app actually shows:
 

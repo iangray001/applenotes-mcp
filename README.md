@@ -22,6 +22,27 @@ avoiding the HTML importer. Notes written this way contain proper formatting.
 Using Shortcuts also lets us write the things that AppleScript does not (checklists, 
 attachments, tables...)
 
+## Requirements
+
+Developed and tested on **macOS 26.5**. The minimum version is not known because it 
+depends on which Notes App Intents are present (in particular *Set Checklist
+Items Checked*, which Apple doesn't even list in the Shortcuts action library...).
+
+You also need Python 3.13+ and [uv](https://docs.astral.sh/uv/).
+
+### Permissions
+
+_Two macOS permissions must be granted to whichever application runs the server_ - which is
+generally your terminal or the Claude Desktop app (i.e. not to Python or to Notes.app). 
+
+* **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access). Reading
+  is done straight from Notes' own store at
+  `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite`, which is protected.
+  Without it the server still runs but degraded. `read_note` falls back to AppleScript
+  HTML, and `edit_note` will refuse to edit.
+* **Automation → Notes** (System Settings → Privacy & Security → Automation). Prompted for
+  on the first `osascript` call.
+
 ## Setup
 
     uv sync
@@ -30,7 +51,10 @@ Register with Claude Code:
 
     claude mcp add applenotes -- uv run --directory /path/to/applenotes_mcp applenotes-mcp
 
-On first use the server generates and signs the bridge shortcut and asks you to import it. 
+On first use the server generates and signs the bridge shortcut and asks you to import it.
+This is a one-time confirmation that Shortcuts cannot be automated around: open the file it
+names and click **Add Shortcut**, then retry. The same happens if you later update the
+server and the installed shortcut falls behind — delete the old one and import the new. 
 
 ## Tools
 
@@ -53,7 +77,7 @@ The tools are annotated (`readOnlyHint`, `destructiveHint`) and the server conta
 reading the source note, creating an edited copy, and deleting the original. This means that:
 
 * the note gets a new internal ID and a new creation date
-* this mess up Shared Notes
+* this messes up Shared Notes
 
 If the note's structure cannot be properly read from NoteStore then the edit is 
 refused rather than run from the degraded HTML. Still, every edit writes a JSON 
@@ -99,3 +123,7 @@ and delete real notes, so they are off by default. Everything happens in a dedic
     APPLENOTES_MCP_LIVE=1 uv run pytest -m live
 
 Both `live` and `APPLENOTES_MCP_LIVE` must be set and both are checked before testing starts.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
