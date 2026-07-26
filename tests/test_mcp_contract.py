@@ -51,6 +51,7 @@ def test_exactly_the_expected_tools_are_exposed(contract) -> None:
         "search_note_text",
         "list_folders",
         "list_folder",
+        "create_folder",
     }
 
 

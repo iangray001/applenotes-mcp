@@ -75,6 +75,29 @@ def test_a_created_note_is_filed_into_the_requested_folder(make_note) -> None:
     assert_in_live_folder(note_id)  # reads the folder back from NoteStore, not a guess
 
 
+def test_create_folder_makes_missing_nested_folders(live_folder) -> None:
+    # A nested path under the dedicated folder; each missing segment is created in order.
+    from applenotes_mcp import notestore
+
+    base = f"{live_folder}/cf-parent/cf-child"
+    try:
+        result = server.create_folder(base)
+        assert "created" in result
+        paths = {f.path for f in notestore.folders()}
+        assert f"{live_folder}/cf-parent" in paths and base in paths
+        # idempotent: a second call is a no-op
+        assert "already exists" in server.create_folder(base)
+    finally:
+        # remove the two folders we made (deepest first), by id
+        for path in (base, f"{live_folder}/cf-parent"):
+            f = next((x for x in notestore.folders() if x.path == path), None)
+            if f:
+                server._osascript(
+                    f'tell application "Notes" to delete folder id '
+                    f"{server._as_str(notestore.folder_id_for_pk(f.pk))}"
+                )
+
+
 def test_a_long_title_is_still_found_and_filed(make_note) -> None:
     # Regression: Notes truncates a note's `name` (its first line) once long enough, so the
     # exact-title lookup used to verify creation returned 0 -- which raised before the folder

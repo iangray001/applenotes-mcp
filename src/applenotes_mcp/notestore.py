@@ -451,6 +451,12 @@ def note_id_for_pk(pk: int) -> str:
     return f"x-coredata://{_store_uuid()}/ICNote/p{pk}"
 
 
+def folder_id_for_pk(pk: int) -> str:
+    """The x-coredata id of a folder, for addressing it exactly in AppleScript (create a
+    subfolder `at folder id ...`, move a note `to folder id ...`)."""
+    return f"x-coredata://{_store_uuid()}/ICFolder/p{pk}"
+
+
 @dataclass(frozen=True)
 class FolderListing:
     subfolders: list[Folder]  # direct children only

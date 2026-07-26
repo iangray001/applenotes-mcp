@@ -25,6 +25,7 @@ from .notestore import (
     NoteStoreError,
     _note_pk,
     folder_contents,
+    folder_id_for_pk,
     folders,
     note_details,
     note_folder,
@@ -53,8 +54,10 @@ Working with note IDs:
     right one rather than guessing.
 
 Writing:
-  * `create_note` needs an existing folder; this server never creates one. Call
-    `list_folders` to see what is available rather than guessing a name.
+  * `create_note` needs an EXISTING folder and refuses an unknown name (so a typo never
+    files a note somewhere by surprise). Call `list_folders` to see what exists. To make a
+    new folder, call `create_folder(path)` first -- it creates any missing parents -- then
+    create the note into it.
   * The `title` argument is the note's title -- the bold first line Apple shows in the
     notes list. Give a real one; do NOT also repeat it as a `# <title>` heading at the top
     of the markdown.
@@ -307,6 +310,56 @@ def list_folder(folder: str) -> str:
     """
     target = _resolve_folder(folder)
     return _format_listing(target.path, folder_contents(target.pk))
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Create a folder",
+        readOnlyHint=False,
+        destructiveHint=False,  # only ever adds folders; never removes or renames one
+        idempotentHint=True,  # a folder that already exists is left as is
+        openWorldHint=False,
+    )
+)
+def create_folder(path: str) -> str:
+    """Create a folder at `path`, making any missing parent folders along the way.
+
+    `path` is a full path like "Personal/Projects/Roadmap"; each segment that does not exist
+    yet is created under the one before it (the first under the top level). A path that
+    already exists is left untouched. This is separate from `create_note` on purpose:
+    `create_note` still REFUSES an unknown folder, so a typo files nothing by surprise --
+    call this first to make the folder deliberately, then create the note into it.
+
+    Folders are addressed by id (built from the store UUID), so nesting under a folder whose
+    name is not unique still works. Refuses if a parent path is itself ambiguous.
+    """
+    segments = [s.strip() for s in path.split("/") if s.strip()]
+    if not segments:
+        raise ValueError("empty folder path")
+
+    all_folders = folders()
+    parent_id: str | None = None
+    depth = 0  # how many leading segments already exist
+    for i in range(len(segments)):
+        prefix = "/".join(segments[: i + 1])
+        matches = [f for f in all_folders if f.path == prefix]
+        if len(matches) > 1:
+            raise ValueError(f"{prefix!r} is ambiguous ({len(matches)} folders); cannot create under it")
+        if not matches:
+            break
+        parent_id = folder_id_for_pk(matches[0].pk)
+        depth = i + 1
+
+    if depth == len(segments):
+        return f"already exists: {path}"
+
+    for seg in segments[depth:]:
+        at = f" at folder id {_as_str(parent_id)}" if parent_id else ""
+        parent_id = _osascript(
+            f'tell application "Notes" to return id of '
+            f"(make new folder with properties {{name:{_as_str(seg)}}}{at})"
+        )
+    return f"created: {'/'.join(segments)}"
 
 
 @mcp.tool(

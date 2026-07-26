@@ -43,28 +43,23 @@ On first use the server generates and signs the bridge shortcut and asks you to 
 | `search_note_text(query)` | **Full-text** search over title and body. Same rows as `search_notes`. |
 | `list_folders()` | The folders a note can be filed into, as full paths. |
 | `list_folder(folder)` | Browse one folder: its notes (newest first) and immediate subfolders. |
+| `create_folder(path)` | Create a folder, making any missing parents. `create_note` still refuses unknown folders. |
 
 The tools are annotated (`readOnlyHint`, `destructiveHint`) and the server contains `instructions` to explain the tools to your model. 
 
 ## Limitations
 
-**Editing is destructive.** Shortcuts can only write to a note it can "find", and there is
-no guaranteed way to find a specific note with Shortcuts:
+**Editing is destructive.** Due to a variety of Apple-based limitations, editing involves 
+reading the source note, creating an edited copy, and deleting the original. This means that:
 
-* `Find Notes` by **name** is a fuzzy ranked search, not a substring match.
-* `Find Notes` by **tag** needs a *static* tag entity (`applenotes:tag/foo`) compiled into
-  the shortcut; the dynamic slot will not coerce a string into one.
+* the note gets a new internal ID and a new creation date
+* this mess up Shared Notes
 
-`edit_note` instead reads the note, deletes it by ID (exact, via AppleScript) and 
-recreates it through the bridge. It will not touch the wrong note, but: 
-
-* the note gets a **new ID and a new creation date**
-* this will also mess with Shared Notes
-
-If the note's structure cannot otherwise be properly read from NoteStore then the edit is 
-**refused** rather than run from the degraded HTML. Still, every edit writes a JSON 
+If the note's structure cannot be properly read from NoteStore then the edit is 
+refused rather than run from the degraded HTML. Still, every edit writes a JSON 
 backup to `~/.local/share/applenotes-mcp/backups/` first, and 
-the original also lands in Notes' Recently Deleted for 30 days.
+the original also lands in Notes' Recently Deleted for 30 days so if anything goes wrong
+then you can just fish it out of the bin.
 
 **Heading depth is flattened below level 3.** Apple's markdown converter maps `#` to Notes'
 *Title* style and `##` to its *Heading* style, both of which round trip intact. `###` maps
@@ -86,61 +81,21 @@ even see intent-created attachments. Attachment display size, by contrast, *is* 
 label attachments by the surrounding note text.
 
 
-## Testing
+## Tests
 
-    uv sync            # installs the dev group (pytest)
-    uv run pytest      # the hermetic tiers -- safe, ~0.5s
+    uv sync
+    uv run pytest
 
-The suite is in three tiers, because the code has an awkward split: most of the logic is
-pure and trivially testable, but the parts that matter most (`edit_note`) delete real notes
-from a library that syncs to iCloud, where a bug in a *test* could destroy data.
+This will test all the normal code logic, renderers, AppleScript use etc. The test 
+suite also includes `tests/fixtures/*.zdata` which are real note protobufs that Notes.app 
+itself wrote, paired with the AppleScript HTML and the expected markdown. 
+These can be regenerated with `uv run python tests/capture_fixtures.py`, which 
+writes `.actual` files that you then promote to `.expected` by hand if everything looks correct.
 
-**Tier 1 — pure functions.** `split_blocks` (including file-reference detection and the
-per-file input index), the table-delimiter widening, the protobuf renderer
-(`_paragraphs`/`_render`/`_inline`, image/table placeholders), the HTML scraper, the
-empty-title guard, and the `edit_note` safety invariants driven with fakes (refuses a
-degraded read, refuses an undownloaded attachment, allows on-disk ones, backs up the
-*true* markdown, never deletes the
-note it just created). No Notes, no NoteStore.
-
-**Tier 2 — golden fixtures.** `tests/fixtures/*.zdata` are real note protobufs captured from
-notes Notes itself wrote, paired with the AppleScript HTML and the expected markdown. The
-reader is run against them with no database and no Notes.app anywhere in the loop, so the
-whole read path is pinned deterministically. Regenerate with
-`uv run python tests/capture_fixtures.py`, which writes `.actual` files you promote to
-`.expected` by hand — a captured bug must not be blessed as correct automatically.
-
-Tiers 1 and 2 also carry `tests/test_apple_conversions.py`: assertions about what Apple's
-markdown converter did to our input (`###` flattens to `##`, a bare URL gains a trailing
-slash). A failure there is *news about Apple*, not a regression in this code — and possibly
-a sign that a workaround can be deleted.
-
-**Tier 3 — live round trips** (`tests/test_live.py`, `tests/test_mcp_contract.py`). The
-properties nothing else can check: that a note written by the bridge and read back through
-the protobuf agree, that reading-then-rewriting reaches a fixed point (`f(f(x)) == f(x)`)
-rather than drifting on every edit, and that a local image referenced in the markdown is
-attached inline and byte-for-byte. These create and delete real notes, so they are **doubly
-gated** and off by default:
+The suite also includes a set of **live round trips** which test the entire flow. These create 
+and delete real notes, so they are off by default. Everything happens in a dedicated 
+`MCP Live Tests` folder, which must exist and be empty before the tests start.
 
     APPLENOTES_MCP_LIVE=1 uv run pytest -m live
 
-Both gates must be set — the `live` marker is deselected by `pytest` by default, *and* every
-live test is skipped unless `APPLENOTES_MCP_LIVE=1`. The guard rails matter more than the
-assertions they protect:
-
-* everything happens in a dedicated `MCP Live Tests` folder;
-* teardown deletes *scoped to that folder by name*, an AppleScript structurally incapable of
-  reaching a note outside it;
-* the folder must be found **empty at the start**, or the run refuses — a blanket delete may
-  only ever run against a folder we know holds nothing but notes this session created, so a
-  non-empty folder (real notes, or leftovers from a hard-killed run) has to be cleared by
-  hand first;
-* teardown asserts the folder is empty afterwards, so a half-finished cleanup fails loudly.
-
-The MCP contract test is in this file group but is itself hermetic: it spawns the server
-over stdio and snapshots what a client sees — tool names, input schemas, the
-`readOnly`/`destructive` annotations, the server instructions — without touching any note.
-
-Two tests are `xfail(strict=True)`, marking known bugs so the suite tells us the moment one
-is fixed: both are markdown-inside-a-code-fence cases (`- [ ]` and `| - |` inside a fence
-being treated as real markup).
+Both `live` and `APPLENOTES_MCP_LIVE` must be set and both are checked before testing starts.
