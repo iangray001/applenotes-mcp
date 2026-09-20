@@ -1,8 +1,9 @@
-"""Tier 1: the markdown that gets handed to Apple's converter.
+"""Tier 1: the markdown that gets handed to Notes' own markdown parser.
 
-split_blocks() decides what Apple's `Make Rich Text from Markdown` ever sees. Two of its
-jobs are workarounds for silent converter bugs -- a wrong result here is a quietly mangled
-note, never an error -- so they are pinned hard.
+split_blocks() decides what that parser ever sees. It splits out only what the parser
+cannot express -- checklist items and file attachments -- and hands it everything else in
+one piece. A wrong result here is a quietly mangled note, never an error, so it is pinned
+hard.
 """
 
 from __future__ import annotations
@@ -14,9 +15,9 @@ from applenotes_mcp.bridge import (
     BridgeError,
     _attachment_paths,
     _version_from_actions,
-    _widen_table_delimiters,
     build_workflow,
     file_ref,
+    losses,
     split_blocks,
 )
 
@@ -58,46 +59,33 @@ def test_a_plain_bullet_is_not_a_checklist() -> None:
     assert kinds("- just a bullet\n") == ["markdown"]
 
 
-def test_every_block_carries_a_checked_key() -> None:
-    # The shortcut reads `checked` unconditionally; a missing key fails the run.
+def test_only_checklist_blocks_carry_a_checked_key() -> None:
+    # The shortcut no longer reads `checked` -- ticking is unwritable on macOS 27 -- so it
+    # survives only on the blocks `losses` inspects.
     for block in split_blocks("# Heading\n\n- [x] done\n\n| a |\n| --- |\n| b |\n"):
-        assert block["checked"] in ("yes", "no")
+        if block["type"] == "checklist":
+            assert block["checked"] in ("yes", "no")
+        else:
+            assert "checked" not in block
 
 
 # -- tables --------------------------------------------------------------------------
+# Notes' own markdown parser handles all of this, so split_blocks no longer rewrites
+# delimiter rows or gives a table its own block. Both were workarounds for the Shortcuts
+# *Make Rich Text from Markdown* converter, which is no longer in the path. Verified
+# against a live note on macOS 27.
 
 
-def test_short_delimiter_rows_are_widened_to_three_dashes() -> None:
-    # `| - | - |` is silently left as literal text by Apple's converter. GFM allows it, so
-    # hand-written markdown hits this constantly.
-    assert _widen_table_delimiters("| - | - |") == "| --- | --- |"
-
-
-def test_widening_preserves_column_alignment_markers() -> None:
-    assert _widen_table_delimiters("| :- | -: | :-: |") == "| :--- | ---: | :---: |"
-
-
-def test_already_wide_delimiters_are_left_alone() -> None:
-    assert _widen_table_delimiters("| --- | :---: |") == "| --- | :---: |"
-
-
-def test_non_delimiter_rows_are_untouched() -> None:
-    for line in ["| a | b |", "not a table", "- a bullet"]:
-        assert _widen_table_delimiters(line) == line
-
-
-def test_a_table_is_sent_as_its_own_block() -> None:
-    # Apple's converter destroys whatever FOLLOWS a table in the same converted chunk: a
-    # bullet list comes back as literal text with a bullet glyph and tabs, which a later
-    # round trip then reads as an indented code block, compounding the damage.
+def test_a_table_and_the_list_after_it_stay_in_one_block() -> None:
     blocks = texts("intro\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n- after the table\n")
-    assert blocks[0] == "intro"
-    assert blocks[1].startswith("| a | b |")
-    assert blocks[2] == "- after the table"
+    assert len(blocks) == 1
+    assert "- after the table" in blocks[0]
 
 
-def test_split_blocks_widens_delimiters_on_the_way_through() -> None:
-    assert "| --- | --- |" in texts("| a | b |\n| - | - |\n| 1 | 2 |\n")[0]
+def test_short_delimiter_rows_are_passed_through_untouched() -> None:
+    # `| - | - |` is valid GFM and Notes' parser accepts it; rewriting it is no longer
+    # needed, and doing so would be a gratuitous edit of the user's text.
+    assert "| - | - |" in texts("| a | b |\n| - | - |\n| 1 | 2 |\n")[0]
 
 
 # -- file attachments ----------------------------------------------------------------
@@ -225,7 +213,27 @@ def test_checklist_syntax_inside_a_code_fence_is_not_a_checklist() -> None:
     assert kinds(markdown) == ["markdown"]
 
 
-@pytest.mark.xfail(strict=True, reason="_widen_table_delimiters does not understand fences")
-def test_a_delimiter_row_inside_a_code_fence_is_not_rewritten() -> None:
-    markdown = "```\n| - | - |\n```\n"
-    assert _widen_table_delimiters(markdown) == markdown
+# -- macOS 27 write losses -----------------------------------------------------------
+# Shortcuts on macOS 27 refuses to IMPORT a workflow containing Set Checklist Items
+# Checked or Set Attachment Size, so neither can be written any more. The note is still
+# created; `losses` is what tells the caller which parts of it are wrong.
+
+
+def test_a_ticked_item_is_reported_as_a_loss() -> None:
+    assert any("UNTICKED" in m for m in losses(split_blocks("- [x] done\n")))
+
+
+def test_an_unticked_item_is_not_a_loss() -> None:
+    assert losses(split_blocks("- [ ] todo\n")) == []
+
+
+def test_an_attachment_size_is_reported_as_a_loss() -> None:
+    assert any("display size" in m for m in losses(split_blocks("![pic|small](/tmp/x.png)\n")))
+
+
+def test_a_sizeless_attachment_is_not_a_loss() -> None:
+    assert losses(split_blocks("![pic](/tmp/x.png)\n")) == []
+
+
+def test_plain_prose_has_no_losses() -> None:
+    assert losses(split_blocks("just some prose\n")) == []

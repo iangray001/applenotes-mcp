@@ -112,7 +112,11 @@ def make_note(live_folder: str):
     created: list[str] = []
 
     def factory(title: str, markdown: str) -> str:
-        note_id = server.create_note(title=title, markdown=markdown, folder=live_folder)
+        # create_note puts the id on the first line and may append WARNING lines for
+        # anything macOS 27 would not let it write.
+        note_id = server.create_note(
+            title=title, markdown=markdown, folder=live_folder
+        ).splitlines()[0]
         created.append(note_id)
         return note_id
 

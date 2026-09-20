@@ -1,8 +1,8 @@
 # applenotes-mcp
 
 An MCP server for Apple Notes that writes properly formatted notes with support for 
-headings, bulleted and numbered lists, tables, ticked checklists, and file attachments
-(images, PDFs).
+headings, bulleted and numbered lists, tables, block quotes, code blocks, checklists, and
+file attachments (images, PDFs).
 
 ## Why this exists
 
@@ -14,19 +14,26 @@ Headings are bold spans rather than real headings, font sizes are wrong, and tab
 checklists, and attachments cannot be created. Better HTML does not help: for example 
 an explicit `13px` is rewritten to `11px` by the importer.
 
-This MCP uses Shortcuts.app instead as the method of writing. Its built-in 
-*Make Rich Text from Markdown* action produces a properly attributed string, 
-and Notes' *Append to Note* App Intent ingests that natively,
-avoiding the HTML importer. Notes written this way contain proper formatting.
+This MCP uses Shortcuts.app instead as the method of writing, driving Notes' own App
+Intents and avoiding the HTML importer entirely. The markdown is parsed by **Notes itself**,
+via the `interpretAsMarkdown` parameter on the *Append to Note* intent — the same parser as
+*File > Import Markdown*. Notes written this way contain proper formatting.
 
-Using Shortcuts also lets us write the things that AppleScript does not (checklists, 
+That parser is markedly better than the Shortcuts *Make Rich Text from Markdown* action
+this used to go through: block quotes, fenced code blocks and horizontal rules survive,
+headings land on the right paragraph style, and single-dash table delimiters (`| - |`) are
+accepted. Two workarounds for that older converter — rewriting delimiter rows, and sending
+each table as its own chunk so the list after it was not destroyed — are gone.
+
+Using Shortcuts also lets us write the things that AppleScript does not (checklists,
 attachments, tables...)
 
 ## Requirements
 
-Developed and tested on **macOS 26.5**. The minimum version is not known because it 
-depends on which Notes App Intents are present (in particular *Set Checklist
-Items Checked*, which Apple doesn't even list in the Shortcuts action library...).
+Developed on **macOS 26.5**, and currently tested on **macOS 27.0**. The minimum version
+is not known because it depends on which Notes App Intents are present. Note that macOS 27
+*removes* two capabilities — see **Ticked checkboxes and attachment sizes cannot be
+written on macOS 27** under Limitations.
 
 You also need Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 
@@ -85,10 +92,20 @@ backup to `~/.local/share/applenotes-mcp/backups/` first, and
 the original also lands in Notes' Recently Deleted for 30 days so if anything goes wrong
 then you can just fish it out of the bin.
 
-**Heading depth is flattened below level 3.** Apple's markdown converter maps `#` to Notes'
-*Title* style and `##` to its *Heading* style, both of which round trip intact. `###` maps
-to *Heading* as well — Notes has a *Subheading* style (`style_type` 2) but the converter
-never emits it so `### Foo` reads back as `## Foo`.
+**Ticked checkboxes and attachment sizes cannot be written on macOS 27.** Not because the
+actions stopped working, but because Shortcuts will no longer *import* a workflow that
+contains them. `com.apple.Notes.SetChecklistItemCheckedLinkActionv2` and
+`com.apple.Notes.SetAttachmentSizeLinkAction` are both refused, with only "This shortcut
+can't be imported because it contains features not supported on this device" and a log line
+reading `Refusing to import shortcut with reasons: <private>`. Every other Notes action the
+bridge uses imports fine. So `- [x]` writes an **unticked** checkbox and `![pic|small](…)`
+attaches at the default size; both are reported as `WARNING` lines after the returned note
+ID rather than left to be quietly wrong. Reading is unaffected — a note ticked or resized by
+hand in Notes.app still reads back correctly. See NOTES.md for how this was narrowed down.
+
+**Heading depth is flattened below level 4.** Notes' markdown parser maps `#` to Notes'
+*Title* style, `##` to *Heading* and `###` to *Subheading*, all of which round trip intact.
+`####` maps to *Subheading* as well, so `#### Foo` reads back as `### Foo`.
 
 **Links gain a trailing slash.** Notes.app normalises a bare-host URL, so
 `https://example.com` comes back as `https://example.com/`.
@@ -101,8 +118,7 @@ title from an attachment's `ZTITLE` field, which it only populates when you add 
 its own UI. Nothing in the automation surface can set it: the *Add File to Note* intent leaves
 it empty (its `name` parameter sets only the media filename, which Notes does not display),
 there is no rename intent, the attachment entity's name is not writable, and AppleScript cannot
-even see intent-created attachments. Attachment display size, by contrast, *is* settable — so
-label attachments by the surrounding note text.
+even see intent-created attachments. Label attachments by the surrounding note text instead.
 
 
 ## Tests

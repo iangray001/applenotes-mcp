@@ -9,17 +9,30 @@ until you download it. Tables need none of this — they are just rebuilt from t
 
 **Writing** goes through a generated Shortcut (`Notes MCP Bridge`), driven headlessly by
 `shortcuts run`. The markdown is split into ordered blocks — prose, individual checklist
-items, tables, and file attachments — and the shortcut walks them, handing each to the
+items, and file attachments — and the shortcut walks them, handing each to the
 relevant Notes intent:
 
     Create Note (plain title)
     Repeat with each block:
-        checklist  → Append Checklist Item   (+ Set Checklist Items Checked if ticked)
-        file       → Add File to Note         (the file fetched by index from the inputs)
-        otherwise  → Make Rich Text from Markdown → Append to Note
+        checklist  → Append Checklist Item
+        file       → Add File to Note   (the file fetched by index from the inputs)
+        otherwise  → Append to Note, with `interpretAsMarkdown` = true
 
 The note is built piecewise because checklists and attachments can only be *appended*: each
 part is handed to its intent in order.
+
+**The markdown is parsed by Notes, not by Shortcuts.** `interpretAsMarkdown` is a parameter
+on the *Append to Note* intent (it appears in Notes' intent metadata as "Interpret as
+Markdown"). It has no legacy Shortcuts key, so it serialises under its own name alongside
+`WFInput`/`WFNote`. It reaches the same parser as *File > Import Markdown*, which handles
+block quotes, fenced code blocks, horizontal rules and single-dash table delimiters — none
+of which the Shortcuts *Make Rich Text from Markdown* action managed.
+
+One trap: the value handed to `WFInput` must be a *typed* one. Feeding it the untyped
+Dictionary Value straight out of *Get Value for Key* makes Shortcuts reject the whole
+workflow at IMPORT time, with the same opaque message as the two refused actions below.
+Passing it through a Text action first fixes it, exactly as the conditional operator needs
+(see the `Dictionary Value` comment in `build_workflow`).
 
 **Attachments** are added with extra `shortcuts run` inputs. The server invokes
 `shortcuts run "Notes MCP Bridge" -i payload.json -i file1 -i file2 ...`, so input item 1 is
@@ -78,9 +91,13 @@ be filtered out to match what Notes.app actually shows:
   real folders look ambiguous when they are not.
 
 
-## "Features" of Apple's markdown converter
+## "Features" of the old Shortcuts markdown converter
 
-Both of these are silent (the note is just quietly wrong) and both are worked around in `bridge.py`.
+**Neither of these applies any more.** Notes' own parser gets both right, verified against a
+live note on macOS 27, and both workarounds have been deleted. They are recorded because
+they are what the block-splitting machinery was shaped around, and they would return if the
+writer ever went back to *Make Rich Text from Markdown*. Both were silent — the note was
+just quietly wrong.
 
 * **Table delimiter rows need three dashes.** `| - | - |` is left as literal text;
   `| --- | --- |` becomes a table. GFM allows a single dash, so hand-written markdown hits
@@ -117,6 +134,11 @@ this work:
   hand-built shortcut. It is the only way to write a ticked item, since Append Checklist
   Item has no `checked` parameter.
 
+**On macOS 27 this no longer works**, because the workflow containing that action can no
+longer be imported — see the section below. `- [x]` now writes an unticked box, and
+`bridge.losses()` reports it. The paragraph above still describes macOS 26 and is kept
+because it is what to restore if the action ever becomes importable again.
+
 ## Attaching Files
 
 *Add File to Note* wants a *file*, and there is no headless way to hand it one by path.
@@ -144,4 +166,53 @@ note-addressing problem.
 * Every action UUID must be unique across the entire Shortcuts library, or signing fails with "Failed to modify some records".
 * Signing seems flaky. The same valid input intermittently fails with that same error, so it needs a retry loop with generous backoff. This requires further investigation.
 * Signing does _not_ validate action identifiers. An incorrect identifier signs happily and only shows up as a broken action after import.
-* Notes' `Metadata.appintents/extract.actionsdata` lists all 48 of its App Intents, and `~/Library/Shortcuts/Shortcuts.sqlite` holds the exact serialisation of any shortcut you build by hand.
+* Notes' `Metadata.appintents/extract.actionsdata` lists all of its App Intents — 48 on macOS 26, 51 on macOS 27 — and `~/Library/Shortcuts/Shortcuts.sqlite` holds the exact serialisation of any shortcut you build by hand. Reading that table back is the only reliable way to learn how Shortcuts wants a parameter serialised.
+* Signing does not validate anything the IMPORT then rejects, so a workflow can sign cleanly and still refuse to install. There is no CLI import, so each candidate costs a manual click — build probes in batches.
+
+## macOS 27 refuses to import two of the Notes actions
+
+Shortcuts on macOS 27 will not import a workflow containing either of:
+
+    com.apple.Notes.SetChecklistItemCheckedLinkActionv2   (ticking a checklist item)
+    com.apple.Notes.SetAttachmentSizeLinkAction           (attachment display size)
+
+The dialog says only "This shortcut can't be imported because it contains features not
+supported on this device". The log gives up nothing more than `Refusing to import shortcut
+with reasons: <private>` — and note that zsh has its own `log` builtin, so you need
+`/usr/bin/log show --predicate 'process == "Shortcuts"' --info --debug`.
+
+It is the actions themselves, not their parameters or the workflow envelope. Narrowed down
+by signing minimal probes and importing them one at a time:
+
+| probe | imports |
+| --- | --- |
+| Create Note + Append to Note (legacy identifiers only) | yes |
+| + full control flow, Shortcut Input, dictionary, repeat | yes |
+| + `CreateChecklistItemLinkAction` | yes |
+| + `AddFileAttachmentLinkAction` | yes |
+| + `SetChecklistItemCheckedLinkActionv2` | **no** |
+| …with its enum parameter omitted | **no** |
+| …with its enum as a string token | **no** |
+| + `SetAttachmentSizeLinkAction` | **no** |
+| …with its enum as a string token | **no** |
+
+Ruled out along the way: signing (the certificate chain is intact, the leaf valid, and
+freshly-signed probes import), `WFWorkflowClientVersion` and `WFWorkflowTypes`, the
+`com.apple.Notes.*` prefix in general, and the bare enum-case string serialisation. An
+unmodified pre-markdown build of the bridge fails identically, so this is not a regression
+from the `interpretAsMarkdown` work.
+
+A copy imported under macOS 26 keeps running indefinitely, which is why this only bites on a
+fresh import — and why it went unnoticed until the shortcut needed regenerating. The
+practical consequence is that the "regenerate and re-import" recovery path is dead for any
+workflow containing those actions.
+
+The **reader** is untouched: ticked state and `ZMERGEABLEPREFERREDVIEWSIZE` are still
+decoded, so a note ticked or resized by hand in Notes.app reads back correctly. Only writing
+is gone. Two live tests pin the new behaviour, so if Apple ever lets these import again the
+suite will fail and say so.
+
+There may be a way back: [pdfux/generate-shortcut-action-os-27](https://github.com/pdfux/generate-shortcut-action-os-27)
+hit the identical error for an unrelated action and worked around it by adding the shortcut
+through Apple's private WorkflowKit API, bypassing the import-time check. That trades a
+one-time manual click for a private-API dependency in the install path.

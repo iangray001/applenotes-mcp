@@ -4,6 +4,31 @@ The note is built chunk by chunk. Create Note returns the note entity, and every
 subsequent action appends to the end of that note, so ordering the appends
 positions the content.
 
+Markdown is parsed by NOTES ITSELF, via the `interpretAsMarkdown` parameter on the
+Append to Note intent, rather than by the Shortcuts *Make Rich Text from Markdown*
+action. It is the same parser as File > Import Markdown, and it is markedly better:
+block quotes, fenced code blocks and horizontal rules all survive, headings land on
+the right paragraph style, and single-dash table delimiters are accepted. What it
+cannot do is a TICKED checklist item -- `- [x]` comes back as plain body text -- so
+checklist items still go through the checklist intent, which is why blocks exist at all.
+
+Two Notes intents were dropped in the macOS 27 era, NOT because they stopped working but
+because Shortcuts will no longer IMPORT a workflow containing them:
+
+    com.apple.Notes.SetChecklistItemCheckedLinkActionv2   (ticking an item)
+    com.apple.Notes.SetAttachmentSizeLinkAction           (attachment display size)
+
+Importing such a workflow fails with "This shortcut can't be imported because it contains
+features not supported on this device", and the log says only "Refusing to import shortcut
+with reasons: <private>". It is the actions themselves, not their parameters: probes with
+the enum omitted, and with the enum serialised as a string token, are refused just the
+same, while Create Note, Append to Note, Append Checklist Item and Add File to Note all
+import fine. A copy imported under macOS 26 keeps running, which is why this only bites on
+a fresh import.
+
+The cost is that `- [x]` now writes an UNTICKED checkbox, and `![img|small]` attaches at
+the default size. Both are visible losses, reported by `run()` to the caller.
+
 Gotchas and rationale are detailed in NOTES.md.
 """
 
@@ -30,7 +55,7 @@ SIGN_ATTEMPTS = 12
 # not reflect. The number is written into a Comment action in the workflow (see
 # build_workflow) and read back from the installed shortcut (see installed_version), so a
 # stale import can be detected and the user asked to re-import.
-BRIDGE_VERSION = 2
+BRIDGE_VERSION = 4
 _VERSION_RE = re.compile(r"applenotes-mcp bridge v(\d+)")
 SHORTCUTS_DB = Path.home() / "Library" / "Shortcuts" / "Shortcuts.sqlite"
 
@@ -80,26 +105,6 @@ def file_ref(line: str) -> tuple[str, str, str | None] | None:
             label, size = head, tail.strip().lower()
     return label or Path(path).name, path, size
 
-# A table delimiter row, e.g. "| --- | :-: |". Apple's markdown parser needs at least
-# THREE dashes per cell: "| - | - |" is silently left as literal text rather than being
-# turned into a table, with no error. GFM permits a single dash so hand-written markdown
-# is likely to trigger this.
-TABLE_DELIMITER = re.compile(r"^\s*\|(?:\s*:?-+:?\s*\|)+\s*$")
-
-
-def _widen_table_delimiters(markdown: str) -> str:
-    def widen(line: str) -> str:
-        if not TABLE_DELIMITER.match(line):
-            return line
-        cells = line.strip().strip("|").split("|")
-        fixed = []
-        for cell in cells:
-            cell = cell.strip()
-            left, right = cell.startswith(":"), cell.endswith(":")
-            fixed.append(("" if not left else ":") + "---" + ("" if not right else ":"))
-        return "| " + " | ".join(fixed) + " |"
-
-    return "\n".join(widen(line) for line in markdown.splitlines())
 
 
 class BridgeError(RuntimeError):
@@ -200,13 +205,10 @@ def _endif(group: str) -> dict:
 def build_workflow() -> dict:
     # The shortcut will fail to sign if UUIDs are not globally unique so we need a bunch
     u_input1, u_dict, u_title, u_blocks, \
-    u_note, u_type, u_type_text, u_text, u_rich, \
-    u_name, u_n, u_file, u_add, \
-    u_size, u_size_text, \
-    u_checked, u_checked_text, u_item, \
-    repeat_group, cl_group, file_group, md_group, tick_group \
-        = (_uid() for _ in range(23))
-    size_groups = {s: _uid() for s in ("small", "medium", "large")}
+    u_note, u_type, u_type_text, u_text, u_md_text, \
+    u_name, u_n, u_file, \
+    repeat_group, cl_group, file_group, md_group \
+        = (_uid() for _ in range(16))
 
     actions = [
         # A leading Comment stamping the version. It does nothing when the shortcut runs;
@@ -255,8 +257,6 @@ def build_workflow() -> dict:
         _dict_value(_repeat_item(), u_text, "text"),
         _dict_value(_repeat_item(), u_name, "name"),
         _dict_value(_repeat_item(), u_n, "n"),
-        _dict_value(_repeat_item(), u_size, "size"),
-        _dict_value(_repeat_item(), u_checked, "checked"),
         # A Dictionary Value is an untyped value, and the "is" comparison is not valid
         # against one -- Shortcuts shows the operator in red and the run fails with
         # "Please choose a value for each parameter". Passing it through a Text action
@@ -276,7 +276,7 @@ def build_workflow() -> dict:
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.CreateChecklistItemLinkAction",
             "WFWorkflowActionParameters": {
-                "UUID": u_item,
+                "UUID": _uid(),
                 "AppIntentDescriptor": _notes_intent("CreateChecklistItemLinkAction"),
                 "name": _output_as_string(u_text, "Dictionary Value"),
                 "noteEntity": _output(u_note, "Create Note"),
@@ -290,7 +290,7 @@ def build_workflow() -> dict:
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.AddFileAttachmentLinkAction",
             "WFWorkflowActionParameters": {
-                "UUID": u_add,
+                "UUID": _uid(),
                 "AppIntentDescriptor": _notes_intent("AddFileAttachmentLinkAction"),
                 "file": _output(u_file, "Item from List"),
                 "name": _output_as_string(u_name, "Dictionary Value"),
@@ -298,13 +298,23 @@ def build_workflow() -> dict:
             },
         },
         _endif(file_group),
-        # prose: markdown -> rich text -> append.
+        # prose: hand the markdown straight to Notes and let IT parse it.
+        #
+        # `interpretAsMarkdown` is a parameter on the Append to Note intent (it is in
+        # Notes' intent metadata as "Interpret as Markdown"). It has no legacy Shortcuts
+        # key, so it serialises under its own name alongside WFInput/WFNote.
         _if(md_group, _uid(), "markdown", _output(u_type_text, "Text")),
+        # Through a Text action first, for the same reason the conditional above needs
+        # one: a Dictionary Value is untyped. `getrichtextfrommarkdown` used to sit here
+        # and yield a typed Rich Text output; handing the untyped value straight to the
+        # intent instead makes Shortcuts reject the whole workflow at IMPORT time, with
+        # "contains features not supported on this device" and no indication of which
+        # action is at fault.
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.getrichtextfrommarkdown",
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
             "WFWorkflowActionParameters": {
-                "UUID": u_rich,
-                "WFInput": _output(u_text, "Dictionary Value"),
+                "UUID": u_md_text,
+                "WFTextActionText": _output_as_string(u_text, "Dictionary Value"),
             },
         },
         {
@@ -312,66 +322,12 @@ def build_workflow() -> dict:
             "WFWorkflowActionParameters": {
                 "UUID": _uid(),
                 "AppIntentDescriptor": _notes_intent("AppendToNoteLinkAction"),
-                "WFInput": _output_as_string(u_rich, "Rich Text from Markdown"),
+                "WFInput": _output_as_string(u_md_text, "Text"),
                 "WFNote": _output(u_note, "Create Note"),
+                "interpretAsMarkdown": True,
             },
         },
         _endif(md_group),
-        # Tick the item we just appended, if the block was `- [x]`. A SECOND, sequential If:
-        # `checked` is only ever "yes" on a checklist block, so the item reference is fresh.
-        #
-        # "Set Checklist Items Checked" is NOT in the Shortcuts action library -- Apple
-        # hides it -- but it is flagged discoverable in Notes' intent metadata and does
-        # resolve and run in a hand-built shortcut. It is the only way to write a ticked
-        # item: CreateChecklistItem has no `checked` parameter.
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
-            "WFWorkflowActionParameters": {
-                "UUID": u_checked_text,
-                "WFTextActionText": _output_as_string(u_checked, "Dictionary Value"),
-            },
-        },
-        _if(tick_group, _uid(), "yes", _output(u_checked_text, "Text")),
-        {
-            "WFWorkflowActionIdentifier": "com.apple.Notes.SetChecklistItemCheckedLinkActionv2",
-            "WFWorkflowActionParameters": {
-                "UUID": _uid(),
-                "AppIntentDescriptor": _notes_intent("SetChecklistItemCheckedLinkActionv2"),
-                "changeOperation": "check",
-                "entities": _output(u_item, "Append Checklist Item"),
-                "note": _output(u_note, "Create Note"),
-            },
-        },
-        _endif(tick_group),
-        # Set the attachment's display size, if the file block asked for one. Independent
-        # Ifs, like the tick above: `size` is only ever small/medium/large on a file block,
-        # and AddFileAttachment (u_add) ran earlier in this same iteration, so its output is
-        # the attachment we just added. One If per size because the enum parameter takes a
-        # literal case string ("small"), the same way SetChecklistItemChecked takes "check".
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
-            "WFWorkflowActionParameters": {
-                "UUID": u_size_text,
-                "WFTextActionText": _output_as_string(u_size, "Dictionary Value"),
-            },
-        },
-        *[
-            action
-            for size, group in size_groups.items()
-            for action in (
-                _if(group, _uid(), size, _output(u_size_text, "Text")),
-                {
-                    "WFWorkflowActionIdentifier": "com.apple.Notes.SetAttachmentSizeLinkAction",
-                    "WFWorkflowActionParameters": {
-                        "UUID": _uid(),
-                        "AppIntentDescriptor": _notes_intent("SetAttachmentSizeLinkAction"),
-                        "target": _output(u_add, "Add File to Note"),
-                        "attachmentSize": size,
-                    },
-                },
-                _endif(group),
-            )
-        ],
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
             "WFWorkflowActionParameters": {
@@ -393,58 +349,48 @@ def build_workflow() -> dict:
         },
         "WFWorkflowImportQuestions": [],
         "WFWorkflowInputContentItemClasses": ["WFStringContentItem"],
-        "WFWorkflowTypes": [],
+        # macOS 27's Shortcuts REFUSES to import a workflow that reads Shortcut Input
+        # (is.workflow.actions.input, via _extension_input) while declaring no surface that
+        # could supply it: the dialog says only "contains features not supported on this
+        # device" and the log says "Refusing to import shortcut with reasons: <private>".
+        # Naming surfaces that take input makes it importable again. macOS 26 accepted the
+        # empty list, so an already-imported v2 kept working across the upgrade while a
+        # fresh import of the very same workflow failed.
+        "WFWorkflowTypes": ["NCWidget", "WatchKit"],
+        "WFQuickActionSurfaces": [],
     }
 
 
 def split_blocks(markdown: str) -> list[dict[str, str]]:
     """Split markdown into prose, checklist items, and file attachments, in order.
 
-    A `- [ ]` / `- [x]` line becomes its own checklist block, carrying its ticked state;
-    a whole-line reference to a local file becomes a `file` block; everything else
-    accumulates into prose blocks. Every block carries a `checked` key ("yes"/"no")
-    because the shortcut reads it unconditionally.
+    A `- [ ]` / `- [x]` line becomes its own checklist block, a whole-line reference to a
+    local file becomes a `file` block, and everything else accumulates into prose blocks.
+
+    Only those two need splitting out. Prose goes to Notes' own markdown parser, which
+    handles a table, and a list directly after a table, and a single-dash delimiter row,
+    all correctly -- so tables no longer get a block to themselves and delimiter rows are
+    no longer rewritten. Both of those were workarounds for the Shortcuts *Make Rich Text
+    from Markdown* converter, which this no longer goes through.
 
     A file block carries `path` (the local file) and `n`: the 1-based position of that file
     among the shortcut's inputs. The shortcut is driven as `-i payload.json -i file1 ...`,
     so input item 1 is the JSON and the files follow -- hence the first file is item 2.
     `run()` reads `path` out to build that `-i` list and drops it before sending the JSON.
     """
-    markdown = _widen_table_delimiters(markdown)
     blocks: list[dict[str, str]] = []
     prose: list[str] = []
-    table: list[str] = []
     file_input_index = 1  # item 1 is the JSON payload; files are numbered from 2
 
     def flush_prose() -> None:
         text = "\n".join(prose).strip()
         prose.clear()
         if text:
-            blocks.append({"type": "markdown", "text": text, "checked": "no"})
-
-    def flush_table() -> None:
-        # A table gets a block to itself. Apple's markdown converter mangles anything
-        # that FOLLOWS a table in the same chunk -- a bullet list after one comes out as
-        # literal text with a bullet glyph and tabs, which a later round trip then reads
-        # as an indented code block. Converting the table on its own avoids that.
-        text = "\n".join(table).strip()
-        table.clear()
-        if text:
-            blocks.append({"type": "markdown", "text": text, "checked": "no"})
+            blocks.append({"type": "markdown", "text": text})
 
     for line in markdown.splitlines():
         checklist = CHECKLIST_LINE.match(line)
         ref = None if checklist else file_ref(line)
-        is_table_row = line.lstrip().startswith("|")
-
-        if is_table_row:
-            if not table:
-                flush_prose()
-            table.append(line)
-            continue
-
-        if table:
-            flush_table()
 
         if checklist:
             flush_prose()
@@ -453,6 +399,8 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
                 {
                     "type": "checklist",
                     "text": text,
+                    # Kept for the caller's benefit (see `losses`), not the shortcut's:
+                    # ticking needs SetChecklistItemChecked, which macOS 27 will not import.
                     "checked": "yes" if state.lower() == "x" else "no",
                 }
             )
@@ -466,17 +414,37 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
                     "name": name,
                     "path": path,
                     "n": str(file_input_index),
-                    "size": size or "",  # "" = default; the shortcut sets a size only if set
+                    # Likewise informational: SetAttachmentSize will not import either.
+                    "size": size or "",
                     "text": "",
-                    "checked": "no",
                 }
             )
         else:
             prose.append(line)
 
-    flush_table()
     flush_prose()
     return blocks
+
+
+def losses(blocks: list[dict[str, str]]) -> list[str]:
+    """What this markdown asked for that macOS 27's Shortcuts can no longer write.
+
+    Both causes are import-time refusals of a Notes intent, detailed in the module
+    docstring. The note is still written; these are the parts of it that will be wrong,
+    and the caller is expected to say so rather than let the note be quietly incorrect.
+    """
+    out: list[str] = []
+    if any(b.get("checked") == "yes" for b in blocks):
+        out.append(
+            "ticked checklist items were written UNTICKED: ticking needs the Notes "
+            "'Set Checklist Items Checked' action, which macOS 27's Shortcuts refuses to import"
+        )
+    if any(b.get("size") for b in blocks):
+        out.append(
+            "attachment display sizes were ignored (attached at default size): sizing needs "
+            "the Notes 'Set Attachment Size' action, which macOS 27's Shortcuts refuses to import"
+        )
+    return out
 
 
 def generate_signed_shortcut() -> Path:

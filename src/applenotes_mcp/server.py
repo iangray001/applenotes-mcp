@@ -38,7 +38,8 @@ from .notestore import (
 # so belongs in no single docstring; per-tool detail stays on the tool.
 INSTRUCTIONS = """\
 Apple Notes, with real rich-text formatting: headings, bullet and numbered lists,
-tables, and tickable checklists all survive as genuine Notes objects.
+tables, block quotes, fenced code blocks, horizontal rules and checkboxes all survive as
+genuine Notes objects.
 
 Working with note IDs:
   * A note ID always comes from a search (`search_notes`, `search_note_text`) or from
@@ -62,15 +63,20 @@ Writing:
     notes list. Give a real one; do NOT also repeat it as a `# <title>` heading at the top
     of the markdown.
   * For section headings inside the body use `##`/`###`, not `#`. Apple's `#` is the Title
-    style, so a `#` heading in the body renders as a second title. `#` and `##` round-trip
-    intact; only `###` and deeper flatten (to `##`), stably -- do not add levels to correct
-    for it.
-  * `- [ ]` and `- [x]` produce real, tickable checkboxes, and the ticked state survives a
-    round trip. Use them for anything list-like the user might tick off.
+    style, so a `#` heading in the body renders as a second title. `#`, `##` and `###`
+    round-trip intact; only `####` and deeper flatten (to `###`), stably -- do not add
+    levels to correct for it.
+  * `- [ ]` produces a real, tickable checkbox. Use it for anything list-like the user might
+    tick off. `- [x]` also produces a real checkbox but it is written UNTICKED: ticking needs
+    a Notes action that macOS 27's Shortcuts will not install. When a write loses something
+    this way, the tool's reply carries a WARNING line after the note ID -- pass that on to
+    the user rather than reporting the note as written exactly as asked.
   * A whole-line `![alt](/local/path)` or `[name](/local/path)` attaches that local file
     (image, PDF, ...) at that point, of any byte size. An http(s) link stays a link. Add a
-    display size with a pipe -- `![alt|small](...)` -- one of small / medium / large; omit
-    it for the default. This round-trips: `read_note` emits the same `|size`.
+    display size with a pipe -- `![alt|small](...)` -- one of small / medium / large. On
+    macOS 27 this is IGNORED on write (same cause as `- [x]`, and likewise reported as a
+    WARNING), though `read_note` still reports the size of an attachment sized by hand in
+    Notes.app.
   * Writes are SLOW and SERIALISED: each `create_note`/`edit_note` drives a Shortcuts run
     taking several seconds, and the server processes them one at a time. Issuing many write
     calls in a single parallel batch gains no speed -- they just queue, and the later ones
@@ -107,9 +113,17 @@ def _as_str(value: str) -> str:
 
 
 def _strip_leading_title(title: str, markdown: str) -> str:
-    """Drop a leading `# Title` duplicating the note title, which Notes sets itself."""
+    """Drop a leading line duplicating the note title, which Notes sets itself.
+
+    Both spellings have to go. A note written in Notes.app carries Title style on its first
+    paragraph, so it reads back as `# Title`; one written through the bridge does NOT --
+    the Create Note intent stores the title as an unstyled paragraph -- so it reads back as
+    a bare `Title`. Stripping only the `#` form let the bare one through, and since
+    edit_note rewrites a note from exactly what read_note returned, every edit prepended
+    another copy of the title to the body.
+    """
     lines = markdown.lstrip().splitlines()
-    if lines and re.fullmatch(rf"#\s+{re.escape(title.strip())}\s*", lines[0]):
+    if lines and re.fullmatch(rf"(#\s+)?{re.escape(title.strip())}\s*", lines[0]):
         return "\n".join(lines[1:]).lstrip()
     return markdown
 
@@ -160,6 +174,19 @@ def _ids_with_title(title: str) -> set[str]:
         end tell
     """)
     return {line.strip() for line in raw.splitlines() if line.strip()}
+
+
+def _with_losses(note_id: str, markdown: str) -> str:
+    """The new note's id, followed by anything macOS 27 stopped us writing.
+
+    The note is created either way; this is what keeps a quietly-wrong note from being
+    reported as a clean success. The id stays on the FIRST line so a caller can still take
+    it with `.splitlines()[0]`.
+    """
+    messages = bridge.losses(bridge.split_blocks(markdown))
+    if not messages:
+        return note_id
+    return note_id + "\n\n" + "\n".join(f"WARNING: {m}" for m in messages)
 
 
 def _create_and_identify(title: str, markdown: str) -> str:
@@ -381,8 +408,13 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
 
     Attachments: a whole-line image `![alt](/path/to/file)` or link `[name](/path)` whose
     target is a LOCAL file (an absolute path or a file:// URL) is attached to the note at
-    that point, of any byte size. An http(s) link stays an ordinary link. A display size may
-    be added after a pipe -- `![alt|small](...)` -- as small, medium or large.
+    that point, of any byte size. An http(s) link stays an ordinary link.
+
+    Two things cannot be written on macOS 27, because Shortcuts refuses to import a
+    workflow containing the Notes action each needs:
+      * `- [x]` creates an UNTICKED checkbox. The text is kept, the tick is not.
+      * `![alt|small](...)` attaches at the default size; the size suffix is ignored.
+    Both are reported as WARNING lines after the returned note ID.
 
     Args:
         title: the note's title -- the bold first line Apple shows in the notes list, not
@@ -397,7 +429,9 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
             the name is not unique, as a full path like "Personal/Projects/Recipes". Call
             list_folders to see what exists; an ambiguous name is rejected, not guessed.
 
-    Returns the new note's ID.
+    Returns the new note's ID on the first line. If anything could not be written (see the
+    `![alt|small]` and `- [x]` notes above), a WARNING line follows it -- report those to
+    the user rather than treating the note as written exactly as asked.
     """
     # Resolve the folder BEFORE writing: the note is created first and moved second, so an
     # unknown or ambiguous name would otherwise leave the note stranded in the default
@@ -412,7 +446,7 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
     note_id = _create_and_identify(title, markdown)
     if target:
         _move_note(note_id, target)
-    return note_id
+    return _with_losses(note_id, markdown)
 
 
 @mcp.tool(
@@ -434,7 +468,9 @@ def read_note(note_id: str) -> str:
 
     Heading depth is preserved through `##`; only `###` and deeper are flattened (to `##`),
     and that is a write-side loss, not a read-side one -- `### Foo` was already stored as a
-    Heading. `#` is Apple's Title style, so the note's own title reads back as `# <title>`.
+    Heading. `#` is Apple's Title style, so a note titled in Notes.app reads back as
+    `# <title>`; one created through this server reads back with a bare title line, because
+    Create Note stores the title unstyled. Either way the first line IS the title.
 
     Falls back to the HTML alone if the protobuf cannot be read, which loses checklists;
     `edit_note` refuses to run in that state rather than rewrite from a degraded read.
@@ -472,7 +508,13 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
     to iCloud) -- the note is refused, since that file cannot be re-attached. The normal flow
     is to `read_note`, edit that markdown, and pass it back here.
 
-    Returns the new note's ID.
+    Ticked checkboxes do NOT survive on macOS 27: a `- [x]` read out of the original comes
+    back as an unticked box, because Shortcuts will no longer import the Notes action that
+    ticks one. The rest of the note is unaffected and the original is backed up, so this is
+    reported rather than refused -- but pass it on to the user, and see the backup if the
+    ticks mattered.
+
+    Returns the new note's ID on the first line, followed by any WARNING lines.
     """
     old_html = _note_field(note_id, "body")
     old_title = _note_field(note_id, "name")
@@ -535,7 +577,8 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
         # the folder it is already in is a no-op.
         _move_note(new_id, folder)
 
-    return f"{new_id} (was {note_id}; backup at {backup})"
+    summary = f"{new_id} (was {note_id}; backup at {backup})"
+    return _with_losses(summary, markdown)
 
 
 def _format_search(matches: list[tuple[str, str]], details: dict[int, NoteDetails]) -> str:

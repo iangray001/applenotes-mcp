@@ -142,7 +142,9 @@ def test_read_back_recovers_the_features_that_were_written(make_note) -> None:
     assert "- first bullet" in md
     assert "1. first number" in md and "2. second number" in md
     assert "- [ ] unticked task" in md
-    assert "- [x] ticked task" in md  # the ticked STATE, which the HTML path cannot see
+    # `- [x]` is written UNTICKED on macOS 27 (see test_a_ticked_item_is_written_unticked),
+    # so what survives is the item, not the tick.
+    assert "- [ ] ticked task" in md
     assert "| Col A | Col B |" in md
     assert "**bold**" in md and "*italic*" in md and "`code`" in md
     assert "￼" not in md  # no object placeholder leaked through
@@ -165,11 +167,28 @@ def test_reading_then_rewriting_reaches_a_fixed_point(make_note) -> None:
     assert once == twice
 
 
-def test_ticked_state_specifically_survives_a_round_trip(make_note) -> None:
+def test_a_ticked_item_is_written_unticked(make_note) -> None:
+    """macOS 27 regression, pinned deliberately.
+
+    Ticking needs the Notes "Set Checklist Items Checked" action, and macOS 27's Shortcuts
+    refuses to IMPORT any workflow containing it ("contains features not supported on this
+    device"), so the bridge no longer carries it. The item is still a real checkbox; only
+    the tick is lost. The READER still decodes ticked state fine -- see the golden
+    fixtures, which were captured before this -- so if this test ever starts failing
+    because the tick survived, the action is importable again and the bridge should get it
+    back.
+    """
     md = server.read_note(make_note("checklist-state", "- [x] done\n- [ ] todo\n"))
-    lines = [ln for ln in md.splitlines() if "task" in ln or "done" in ln or "todo" in ln]
-    assert "- [x] done" in lines
+    lines = [ln for ln in md.splitlines() if "done" in ln or "todo" in ln]
+    assert "- [ ] done" in lines
     assert "- [ ] todo" in lines
+
+
+def test_a_ticked_item_is_reported_as_a_loss(make_note, live_folder) -> None:
+    out = server.create_note(
+        title="tick-warning", markdown="- [x] done\n", folder=live_folder
+    )
+    assert "WARNING" in out and "UNTICKED" in out
 
 
 # -- edit_note (destructive) ---------------------------------------------------------
@@ -198,13 +217,13 @@ def test_edit_keeps_the_note_in_its_original_folder(make_note) -> None:
     assert_in_live_folder(new_id)
 
 
-def test_edit_preserves_a_checklists_ticked_state(make_note) -> None:
-    # The whole point of refusing to edit from the degraded HTML: an edit must not turn a
-    # ticked box into a plain bullet.
-    old_id = make_note("edit-checklist", "- [x] keep me ticked\n")
+def test_edit_keeps_a_checklist_item_as_a_checkbox(make_note) -> None:
+    # Editing must not turn a checkbox into a plain bullet. The TICK cannot survive on
+    # macOS 27 (see test_a_ticked_item_is_written_unticked), but the checkbox must.
+    old_id = make_note("edit-checklist", "- [ ] keep me a box\n")
     read_back = server.read_note(old_id)
     new_id = _new_id(server.edit_note(old_id, read_back))
-    assert "- [x] keep me ticked" in server.read_note(new_id)
+    assert "- [ ] keep me a box" in server.read_note(new_id)
 
 
 # -- attachments (create) ------------------------------------------------------------
@@ -235,17 +254,21 @@ def test_create_note_attaches_a_local_image_inline(make_note, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("size", ["small", "medium", "large"])
-def test_a_display_size_round_trips(make_note, tmp_path, size) -> None:
-    """`![name|size](file)` sets that display size, and reads back as the same `|size`.
+def test_a_display_size_is_ignored_and_reported(make_note, tmp_path, size, live_folder) -> None:
+    """macOS 27 regression, pinned deliberately -- the counterpart of the ticking one.
 
-    Also proves the read-side value map (ZMERGEABLEPREFERREDVIEWSIZE -> size name) matches
-    what the Set Attachment Size intent writes for each case.
+    Sizing needs the Notes "Set Attachment Size" action, which macOS 27's Shortcuts refuses
+    to import, so the file attaches at its default size and the size suffix is inert. The
+    read side still maps ZMERGEABLEPREFERREDVIEWSIZE to a size name, so a note sized by
+    hand in Notes.app still reads back with its `|size`; only writing is gone.
     """
     img = tmp_path / f"{size}.png"
     img.write_bytes(_png())
-    note_id = make_note(f"sized-{size}", f"![pic|{size}]({img.as_uri()})\n")
-    out = server.read_note(note_id)
-    assert f"|{size}]" in out, f"{size} did not round-trip; got: {out!r}"
+    out = server.create_note(
+        title=f"sized-{size}", markdown=f"![pic|{size}]({img.as_uri()})\n", folder=live_folder
+    )
+    assert "WARNING" in out and "display size" in out
+    assert f"|{size}]" not in server.read_note(out.splitlines()[0])
 
 
 def test_no_size_reads_back_without_a_pipe(make_note, tmp_path) -> None:

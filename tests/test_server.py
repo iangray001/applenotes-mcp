@@ -162,6 +162,17 @@ def test_a_deeper_heading_matching_the_title_is_kept() -> None:
     assert server._strip_leading_title("Shopping", "## Shopping\n\nmilk\n").startswith("## ")
 
 
+def test_a_bare_leading_title_line_is_dropped() -> None:
+    # A note created through the bridge stores its title UNSTYLED, so read_note returns it
+    # as a bare line rather than `# Shopping`. edit_note feeds that read straight back, so
+    # missing this spelling prepended another title to the body on every single edit.
+    assert server._strip_leading_title("Shopping", "Shopping\n\nmilk\n") == "milk"
+
+
+def test_a_bare_line_that_is_not_the_title_is_kept() -> None:
+    assert server._strip_leading_title("Shopping", "milk\n\neggs\n").startswith("milk")
+
+
 # -- empty-title guard (_promote_title) ----------------------------------------------
 
 

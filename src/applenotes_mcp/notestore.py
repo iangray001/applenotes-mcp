@@ -19,10 +19,18 @@ Verified protobuf schema (field numbers confirmed against real notes):
                      100 bullet, 101 dashed, 102 numbered, 103 checklist
           .4         indent level
           .5         Checklist { .2 = done }
+          .8         blockquote (1 on every paragraph of a block quote)
         .3           Font        (a monospaced face means an inline code span)
         .5           font_weight: 1 bold, 2 italic, 3 both
+        .7           strikethrough
         .9           link URL (string)
         .12          AttachmentInfo { .1 = identifier (ICAttachment id), .2 = type UTI }
+        .14          inline style: 2 = code span
+
+Two converters write these notes and they mark inline code differently: the Shortcuts
+*Make Rich Text from Markdown* action sets a monospaced Font (.3), while Notes' own
+markdown parser -- what `interpretAsMarkdown` reaches -- sets .14 = 2 and no font, which
+Notes renders as the pink code highlight. Both are read as an inline code span.
 
 Tables are not in the protobuf: they are separate attachment objects (their content is a
 CRDT in ZMERGEABLEDATA), appearing in the text only as a U+FFFC placeholder. Rather than
@@ -50,6 +58,13 @@ OBJECT_PLACEHOLDER = "￼"
 # The UTI Notes gives a table. A table's content is a CRDT in a separate attachment, not a
 # file on disk, so it is spliced from the HTML rather than resolved to a path.
 TABLE_UTI = "com.apple.notes.table"
+
+# A horizontal rule. Notes stores it as an inline attachment like a table, but it has no
+# content of its own -- the UTI is the whole of it.
+DIVIDER_UTI = "com.apple.notes.inlinetextattachment.dividerline"
+
+# AttributeRun field 14, when Notes' own markdown parser marks an inline code span.
+INLINE_CODE = 2
 
 STYLE_TITLE = 0
 STYLE_HEADING = 1
@@ -136,6 +151,9 @@ class Run:
     checked: bool | None = None
     weight: int = 0
     monospaced: bool = False
+    code: bool = False  # an inline code span marked by field 14 rather than by a font
+    strikethrough: bool = False
+    blockquote: bool = False
     link: str | None = None
     # An inline attachment carries a U+FFFC placeholder in the text and an AttachmentInfo
     # (field 12) here: its identifier (the ICAttachment ZIDENTIFIER) and type UTI. Tables
@@ -149,6 +167,7 @@ class Paragraph:
     style_type: int | None = None
     indent: int = 0
     checked: bool | None = None
+    blockquote: bool = False
     runs: list[tuple[str, Run]] = field(default_factory=list)
 
 
@@ -201,12 +220,18 @@ def decode(zdata: bytes) -> tuple[str, list[Run]]:
                     elif pnum == 5 and pwire == 2:
                         done = _first(pval, 2)
                         run.checked = bool(done)
+                    elif pnum == 8 and pwire == 0:
+                        run.blockquote = bool(pval)
             elif rnum == 3 and rwire == 2:
                 name = _first(rval, 1)
                 if name and b"Monospaced" in name:
                     run.monospaced = True
             elif rnum == 5 and rwire == 0:
                 run.weight = rval
+            elif rnum == 7 and rwire == 0:
+                run.strikethrough = bool(rval)
+            elif rnum == 14 and rwire == 0:
+                run.code = rval == INLINE_CODE
             elif rnum == 9 and rwire == 2:
                 run.link = rval.decode("utf-8", "replace")
             elif rnum == 12 and rwire == 2:
@@ -239,16 +264,24 @@ def _paragraphs(text: str, runs: list[Run]) -> list[Paragraph]:
             current.style_type = run.style_type
         if run.checked is not None and current.checked is None:
             current.checked = run.checked
+        current.blockquote = current.blockquote or run.blockquote
         current.indent = max(current.indent, run.indent)
 
         while "\n" in chunk:
             head, chunk = chunk.split("\n", 1)
             if head:
                 current.runs.append((head, run))
-            # Left unstyled: a paragraph takes its style from the next run to reach the
-            # top of the outer loop, not from the run whose tail happens to start it.
             paragraphs.append(Paragraph())
             current = paragraphs[-1]
+            # A run can span newlines -- a fenced code block arrives as one run holding
+            # every line of it -- and each of those paragraphs carries the run's style.
+            # Only the paragraph left over AFTER the run's final newline is left unstyled,
+            # so it still takes its style from the next run to reach the top of the loop
+            # rather than from the run whose tail happens to start it.
+            if chunk and run.style_type is not None:
+                current.style_type = run.style_type
+                current.indent = run.indent
+                current.blockquote = run.blockquote
 
         if chunk:
             current.runs.append((chunk, run))
@@ -259,7 +292,7 @@ def _paragraphs(text: str, runs: list[Run]) -> list[Paragraph]:
 def _inline(text: str, run: Run, in_heading: bool = False) -> str:
     if not text.strip():
         return text
-    if run.monospaced:
+    if run.monospaced or run.code:
         return f"`{text}`"
 
     lead = len(text) - len(text.lstrip())
@@ -272,6 +305,8 @@ def _inline(text: str, run: Run, in_heading: bool = False) -> str:
         core = f"**{core}**"
     if run.weight & ITALIC:
         core = f"*{core}*"
+    if run.strikethrough:
+        core = f"~~{core}~~"
     if run.link:
         core = f"[{core}]({run.link})"
     return text[:lead] + core + text[len(text) - trail :] if trail else text[:lead] + core
@@ -294,21 +329,36 @@ def _render(
     lines: list[str] = []
     number = 0
     table_index = 0
+    in_code = False
+    resolved_table = False
+
+    def close_code() -> None:
+        nonlocal in_code
+        if in_code:
+            lines.append("```")
+            in_code = False
 
     def resolve_placeholder(run: Run) -> str:
-        nonlocal table_index
+        nonlocal table_index, resolved_table
+        if run.att_uti == DIVIDER_UTI:
+            return "---"
         if run.att_uti == TABLE_UTI or run.att_uti is None:
             # A table, or a placeholder with no attachment info (legacy notes): take the
             # next table from the HTML, preserving the old behaviour for the latter.
             table = tables[table_index] if table_index < len(tables) else ""
             table_index += 1
+            resolved_table = True
             return table
         return media.get(run.att_identifier or "", f"[attachment: {run.att_uti}]")
 
     for para in paragraphs:
-        in_heading = para.style_type in HEADING_PREFIX
+        style = para.style_type
+        if style != STYLE_MONOSPACED:
+            close_code()
+        in_heading = style in HEADING_PREFIX
 
         if any(OBJECT_PLACEHOLDER in text for text, _ in para.runs):
+            resolved_table = False
             parts: list[str] = []
             for text, run in para.runs:
                 for piece in re.split(f"({OBJECT_PLACEHOLDER})", text):
@@ -317,11 +367,15 @@ def _render(
                     elif piece:
                         parts.append(_inline(piece, run, in_heading))
             lines.extend("".join(parts).strip("\n").splitlines())
+            # Two tables in a row are two separate attachments, but every line of both is
+            # a "table" line to the blank-line pass below, which would run them together
+            # into one table. An explicit break keeps them apart.
+            if resolved_table:
+                lines.append("")
             continue
 
         body = "".join(_inline(text, run, in_heading) for text, run in para.runs)
 
-        style = para.style_type
         if style != STYLE_NUMBERED:
             number = 0
 
@@ -337,9 +391,18 @@ def _render(
             number += 1
             lines.append(f"{indent}{number}. {body}")
         elif style == STYLE_MONOSPACED:
-            lines.append(f"    {body}")
+            # Fenced rather than indented: the paragraph's text carries the code's OWN
+            # indentation, so a 4-space prefix would be read back as part of the code.
+            if not in_code:
+                lines.append("```")
+                in_code = True
+            lines.append(body)
         else:
             lines.append(body)
+
+        # A block quote keeps whatever prefix its paragraph style produced.
+        if para.blockquote and not in_code:
+            lines[-1] = f"> {lines[-1]}".rstrip()
 
     # Blank line between blocks, but keep a run of same-kind list items (or table rows)
     # together. The KIND matters: a numbered list directly after a bullet list, with no
@@ -356,8 +419,22 @@ def _render(
             return "table"
         return None
 
+    close_code()
+
     out: list[str] = []
+    fenced = False
     for line in lines:
+        # Inside a fence every line is content, including blank ones, so the blank-line
+        # pass has to leave it alone.
+        if line.startswith("```"):
+            fenced = not fenced
+            if fenced and out and out[-1].strip():
+                out.append("")
+            out.append(line)
+            continue
+        if fenced:
+            out.append(line)
+            continue
         if out and line.strip() and out[-1].strip():
             this, prev = kind(line), kind(out[-1])
             if this is None or this != prev:

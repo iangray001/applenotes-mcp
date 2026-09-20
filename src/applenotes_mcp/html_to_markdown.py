@@ -21,6 +21,10 @@ class _NotesHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.blocks: list[str] = []
+        # One entry per <table>, kept separate from `blocks` because two tables can sit
+        # directly against each other: in `blocks` their rows are indistinguishable from
+        # one longer table, and extract_tables has to tell them apart.
+        self.tables: list[str] = []
         self._text: list[str] = []
 
         self._heading: int | None = None
@@ -161,10 +165,13 @@ class _NotesHTMLParser(HTMLParser):
         header, *body = rows
         # Notes bolds header cells itself; keeping the ** would re-bold on rewrite.
         header = [re.sub(r"^\*\*(.*)\*\*$", r"\1", c) for c in header]
-        self.blocks.append("| " + " | ".join(header) + " |")
-        self.blocks.append("| " + " | ".join(["---"] * width) + " |")
-        for row in body:
-            self.blocks.append("| " + " | ".join(row) + " |")
+        rendered = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(["---"] * width) + " |",
+            *("| " + " | ".join(row) + " |" for row in body),
+        ]
+        self.tables.append("\n".join(rendered))
+        self.blocks.extend(rendered)
 
     def close(self):  # type: ignore[override]
         super().close()
@@ -207,15 +214,4 @@ def extract_tables(html: str) -> list[str]:
     parser = _NotesHTMLParser()
     parser.feed(html)
     parser.close()
-
-    tables: list[str] = []
-    current: list[str] = []
-    for block in parser.blocks:
-        if block.startswith("| "):
-            current.append(block)
-        elif current:
-            tables.append("\n".join(current))
-            current = []
-    if current:
-        tables.append("\n".join(current))
-    return tables
+    return parser.tables
