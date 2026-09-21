@@ -134,10 +134,10 @@ this work:
   hand-built shortcut. It is the only way to write a ticked item, since Append Checklist
   Item has no `checked` parameter.
 
-**On macOS 27 this no longer works**, because the workflow containing that action can no
-longer be imported — see the section below. `- [x]` now writes an unticked box, and
-`bridge.losses()` reports it. The paragraph above still describes macOS 26 and is kept
-because it is what to restore if the action ever becomes importable again.
+**On macOS 27 this depends on which build is installed.** The action still works, but the
+workflow containing it can no longer be imported through the Shortcuts app — see the
+section below. The basic build therefore leaves it out and `- [x]` writes an unticked box,
+reported by `bridge.losses()`; the full build keeps it and ticks correctly.
 
 ## Attaching Files
 
@@ -208,11 +208,34 @@ practical consequence is that the "regenerate and re-import" recovery path is de
 workflow containing those actions.
 
 The **reader** is untouched: ticked state and `ZMERGEABLEPREFERREDVIEWSIZE` are still
-decoded, so a note ticked or resized by hand in Notes.app reads back correctly. Only writing
-is gone. Two live tests pin the new behaviour, so if Apple ever lets these import again the
-suite will fail and say so.
+decoded, so a note ticked or resized by hand in Notes.app reads back correctly.
 
-There may be a way back: [pdfux/generate-shortcut-action-os-27](https://github.com/pdfux/generate-shortcut-action-os-27)
-hit the identical error for an unrelated action and worked around it by adding the shortcut
-through Apple's private WorkflowKit API, bypassing the import-time check. That trades a
-one-time manual click for a private-API dependency in the install path.
+### Getting them back: the full build
+
+The actions are not broken. Only the importer objects, so stepping around the importer
+restores them, and `tools/wfimport.m` does exactly that: it unwraps the signed package with
+`WFShortcutPackageFile`, rebuilds it as a `WFWorkflowRecord`, and inserts it straight into
+`~/Library/Shortcuts/Shortcuts.sqlite` via `WFDatabase createWorkflowWithOptions:`. That is
+private WorkflowKit SPI, and the approach follows
+[pdfux/generate-shortcut-action-os-27](https://github.com/pdfux/generate-shortcut-action-os-27),
+which hit the identical refusal for an unrelated action.
+
+Verified end to end on macOS 27: a workflow the Shortcuts app refused three times imported
+this way with every action intact, ran headlessly, and set an attachment's display size.
+The whole live suite passes against the full build, ticking and all three sizes included.
+
+So `build_workflow(full=...)` produces two builds. The basic one installs with a click and
+is the default; the full one needs `wfimport`. Which is installed is stamped into the
+leading Comment action ("v5 basic" / "v5 full"), so `losses()` knows whether to warn, and
+an update never silently downgrades a full install to a basic one.
+
+### Enum parameters must be BARE strings
+
+An App Intent enum parameter (`changeOperation`, `attachmentSize`) is serialised as a plain
+Python string — `"check"`, `"small"` — NOT as a `WFTextTokenString`. Wrapping one in a
+string token leaves the parameter unresolved, and Shortcuts then stops mid-run to ask the
+user which case they meant. Under `shortcuts run` that dialog is invisible: the run simply
+never returns, which reads exactly like a hang, and whatever the user eventually picks is
+silently applied to every branch. This cost an afternoon — `small` happened to be chosen,
+so `small` appeared to round-trip correctly while `medium` and `large` both came back as
+`small`.

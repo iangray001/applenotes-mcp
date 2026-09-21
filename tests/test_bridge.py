@@ -14,6 +14,7 @@ from applenotes_mcp.bridge import (
     BRIDGE_VERSION,
     BridgeError,
     _attachment_paths,
+    _full_from_actions,
     _version_from_actions,
     build_workflow,
     file_ref,
@@ -178,14 +179,34 @@ def test_a_workflow_with_no_comment_reads_as_version_zero() -> None:
     assert _version_from_actions([{"WFWorkflowActionIdentifier": "is.workflow.actions.gettext"}]) == 0
 
 
-def test_the_version_is_parsed_from_the_comment_text() -> None:
-    actions = [
+def _stamped(text: str) -> list[dict]:
+    return [
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.comment",
-            "WFWorkflowActionParameters": {"WFCommentActionText": "applenotes-mcp bridge v7 (x)"},
+            "WFWorkflowActionParameters": {"WFCommentActionText": text},
         }
     ]
-    assert _version_from_actions(actions) == 7
+
+
+def test_the_version_is_parsed_from_the_comment_text() -> None:
+    assert _version_from_actions(_stamped("applenotes-mcp bridge v7 basic (x)")) == 7
+    assert _version_from_actions(_stamped("applenotes-mcp bridge v7 full (x)")) == 7
+
+
+def test_the_build_variant_is_parsed_from_the_comment_text() -> None:
+    # Which build is installed decides whether a ticked item or an attachment size is a
+    # loss to report, so a misread here would make the server lie in either direction.
+    assert _full_from_actions(_stamped("applenotes-mcp bridge v7 full (x)")) is True
+    assert _full_from_actions(_stamped("applenotes-mcp bridge v7 basic (x)")) is False
+
+
+def test_an_unstamped_workflow_is_not_treated_as_full() -> None:
+    assert _full_from_actions(_stamped("something else entirely")) is False
+
+
+def test_each_build_stamps_itself() -> None:
+    assert _full_from_actions(build_workflow(full=True)["WFWorkflowActions"]) is True
+    assert _full_from_actions(build_workflow(full=False)["WFWorkflowActions"]) is False
 
 
 # -- general -------------------------------------------------------------------------
@@ -220,20 +241,26 @@ def test_checklist_syntax_inside_a_code_fence_is_not_a_checklist() -> None:
 
 
 def test_a_ticked_item_is_reported_as_a_loss() -> None:
-    assert any("UNTICKED" in m for m in losses(split_blocks("- [x] done\n")))
+    assert any("UNTICKED" in m for m in losses(split_blocks("- [x] done\n"), full=False))
 
 
 def test_an_unticked_item_is_not_a_loss() -> None:
-    assert losses(split_blocks("- [ ] todo\n")) == []
+    assert losses(split_blocks("- [ ] todo\n"), full=False) == []
 
 
 def test_an_attachment_size_is_reported_as_a_loss() -> None:
-    assert any("display size" in m for m in losses(split_blocks("![pic|small](/tmp/x.png)\n")))
+    assert any("display size" in m for m in losses(split_blocks("![pic|small](/tmp/x.png)\n"), full=False))
 
 
 def test_a_sizeless_attachment_is_not_a_loss() -> None:
-    assert losses(split_blocks("![pic](/tmp/x.png)\n")) == []
+    assert losses(split_blocks("![pic](/tmp/x.png)\n"), full=False) == []
 
 
 def test_plain_prose_has_no_losses() -> None:
-    assert losses(split_blocks("just some prose\n")) == []
+    assert losses(split_blocks("just some prose\n"), full=False) == []
+
+
+def test_the_full_build_reports_no_losses() -> None:
+    # The full build writes both, so nothing is lost and nothing should be warned about.
+    assert losses(split_blocks("- [x] done\n"), full=True) == []
+    assert losses(split_blocks("![pic|small](/tmp/x.png)\n"), full=True) == []

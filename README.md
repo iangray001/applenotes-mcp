@@ -32,8 +32,8 @@ attachments, tables...)
 
 Developed on **macOS 26.5**, and currently tested on **macOS 27.0**. The minimum version
 is not known because it depends on which Notes App Intents are present. Note that macOS 27
-*removes* two capabilities — see **Ticked checkboxes and attachment sizes cannot be
-written on macOS 27** under Limitations.
+*removes* two capabilities from the default install — see **Ticked checkboxes and
+attachment sizes need the full build** under Limitations.
 
 You also need Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 
@@ -62,6 +62,31 @@ On first use the server generates and signs the bridge shortcut and asks you to 
 This is a one-time confirmation that Shortcuts cannot be automated around: open the file it
 names and click **Add Shortcut**, then retry. The same happens if you later update the
 server and the installed shortcut falls behind — delete the old one and import the new. 
+
+## Installing the full build
+
+Optional, and only worth it if you want ticked checkboxes (`- [x]`) or attachment display
+sizes (`![pic|small]`). Everything else works identically on the basic build.
+
+The two actions those need still run perfectly; it is only the Shortcuts app's importer
+that rejects them. `tools/wfimport.m` installs a signed shortcut by talking to WorkflowKit
+directly, skipping that check:
+
+    clang -fobjc-arc -framework Foundation -o wfimport tools/wfimport.m
+
+Generate the full build, then install it — quit Shortcuts.app first, and delete any
+existing *Notes MCP Bridge* so you do not end up with two:
+
+    uv run python -c "from applenotes_mcp import bridge; print(bridge.generate_signed_shortcut(full=True))"
+    ./wfimport "$HOME/.local/share/applenotes-mcp/Notes MCP Bridge.shortcut" \
+               ~/Library/Shortcuts/Shortcuts.sqlite
+
+**Understand what you are taking on.** This is private Apple SPI writing directly to a
+database that syncs to iCloud. It works today and the whole live suite passes against it,
+but Apple can change either at any release, and nothing here is supported. Back up
+`~/Library/Shortcuts/` first. The server tells the two builds apart by a marker inside the
+shortcut, so it always knows which capabilities it has, and updating regenerates whichever
+build you installed rather than silently downgrading you.
 
 ## Tools
 
@@ -92,16 +117,19 @@ backup to `~/.local/share/applenotes-mcp/backups/` first, and
 the original also lands in Notes' Recently Deleted for 30 days so if anything goes wrong
 then you can just fish it out of the bin.
 
-**Ticked checkboxes and attachment sizes cannot be written on macOS 27.** Not because the
-actions stopped working, but because Shortcuts will no longer *import* a workflow that
+**Ticked checkboxes and attachment sizes need the full build.** Not because the actions
+stopped working, but because macOS 27's Shortcuts will no longer *import* a workflow that
 contains them. `com.apple.Notes.SetChecklistItemCheckedLinkActionv2` and
 `com.apple.Notes.SetAttachmentSizeLinkAction` are both refused, with only "This shortcut
 can't be imported because it contains features not supported on this device" and a log line
 reading `Refusing to import shortcut with reasons: <private>`. Every other Notes action the
-bridge uses imports fine. So `- [x]` writes an **unticked** checkbox and `![pic|small](…)`
-attaches at the default size; both are reported as `WARNING` lines after the returned note
-ID rather than left to be quietly wrong. Reading is unaffected — a note ticked or resized by
-hand in Notes.app still reads back correctly. See NOTES.md for how this was narrowed down.
+bridge uses imports fine.
+
+The default (basic) build therefore leaves them out: `- [x]` writes an **unticked** checkbox
+and `![pic|small](…)` attaches at the default size. Neither is silent — both are reported as
+`WARNING` lines after the returned note ID. Reading is unaffected either way: a note ticked
+or resized by hand in Notes.app still reads back correctly. To get them back, install the
+full build (below). See NOTES.md for how this was narrowed down.
 
 **Heading depth is flattened below level 4.** Notes' markdown parser maps `#` to Notes'
 *Title* style, `##` to *Heading* and `###` to *Subheading*, all of which round trip intact.

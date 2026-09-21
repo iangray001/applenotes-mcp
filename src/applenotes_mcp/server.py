@@ -66,17 +66,18 @@ Writing:
     style, so a `#` heading in the body renders as a second title. `#`, `##` and `###`
     round-trip intact; only `####` and deeper flatten (to `###`), stably -- do not add
     levels to correct for it.
-  * `- [ ]` produces a real, tickable checkbox. Use it for anything list-like the user might
-    tick off. `- [x]` also produces a real checkbox but it is written UNTICKED: ticking needs
-    a Notes action that macOS 27's Shortcuts will not install. When a write loses something
-    this way, the tool's reply carries a WARNING line after the note ID -- pass that on to
-    the user rather than reporting the note as written exactly as asked.
+  * `- [ ]` and `- [x]` produce real, tickable checkboxes. Use them for anything list-like
+    the user might tick off. On macOS 27 the default install cannot write the TICK (the
+    box is still created); whether yours can depends on which bridge build is installed, so
+    do not promise either way. Any write that loses something says so: the tool's reply
+    carries a WARNING line after the note ID. Pass those on to the user rather than
+    reporting the note as written exactly as asked.
   * A whole-line `![alt](/local/path)` or `[name](/local/path)` attaches that local file
     (image, PDF, ...) at that point, of any byte size. An http(s) link stays a link. Add a
-    display size with a pipe -- `![alt|small](...)` -- one of small / medium / large. On
-    macOS 27 this is IGNORED on write (same cause as `- [x]`, and likewise reported as a
-    WARNING), though `read_note` still reports the size of an attachment sized by hand in
-    Notes.app.
+    display size with a pipe -- `![alt|small](...)` -- one of small / medium / large; omit
+    it for the default. Same caveat as `- [x]`: the default install on macOS 27 ignores the
+    size and reports a WARNING, while the full build applies it. `read_note` always reports
+    the real size.
   * Writes are SLOW and SERIALISED: each `create_note`/`edit_note` drives a Shortcuts run
     taking several seconds, and the server processes them one at a time. Issuing many write
     calls in a single parallel batch gains no speed -- they just queue, and the later ones
@@ -410,11 +411,12 @@ def create_note(title: str, markdown: str, folder: str | None = None) -> str:
     target is a LOCAL file (an absolute path or a file:// URL) is attached to the note at
     that point, of any byte size. An http(s) link stays an ordinary link.
 
-    Two things cannot be written on macOS 27, because Shortcuts refuses to import a
-    workflow containing the Notes action each needs:
-      * `- [x]` creates an UNTICKED checkbox. The text is kept, the tick is not.
-      * `![alt|small](...)` attaches at the default size; the size suffix is ignored.
-    Both are reported as WARNING lines after the returned note ID.
+    Two things depend on which bridge build is installed, because macOS 27's Shortcuts
+    refuses to import a workflow containing the Notes action each needs (the full build
+    sidesteps that; the default build does not):
+      * `- [x]` may create an UNTICKED checkbox -- the text is kept, the tick is not.
+      * `![alt|small](...)` may attach at the default size, ignoring the suffix.
+    Whenever either is actually lost it is reported as a WARNING line after the note ID.
 
     Args:
         title: the note's title -- the bold first line Apple shows in the notes list, not
@@ -508,11 +510,11 @@ def edit_note(note_id: str, markdown: str, title: str | None = None) -> str:
     to iCloud) -- the note is refused, since that file cannot be re-attached. The normal flow
     is to `read_note`, edit that markdown, and pass it back here.
 
-    Ticked checkboxes do NOT survive on macOS 27: a `- [x]` read out of the original comes
-    back as an unticked box, because Shortcuts will no longer import the Notes action that
-    ticks one. The rest of the note is unaffected and the original is backed up, so this is
-    reported rather than refused -- but pass it on to the user, and see the backup if the
-    ticks mattered.
+    Ticked checkboxes may not survive on macOS 27: unless the full bridge build is
+    installed, a `- [x]` read out of the original comes back as an unticked box, because
+    Shortcuts will not import the Notes action that ticks one. The rest of the note is
+    unaffected and the original is backed up, so this is reported rather than refused --
+    but pass the WARNING on to the user, and see the backup if the ticks mattered.
 
     Returns the new note's ID on the first line, followed by any WARNING lines.
     """

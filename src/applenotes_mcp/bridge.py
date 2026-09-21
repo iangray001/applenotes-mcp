@@ -55,8 +55,10 @@ SIGN_ATTEMPTS = 12
 # not reflect. The number is written into a Comment action in the workflow (see
 # build_workflow) and read back from the installed shortcut (see installed_version), so a
 # stale import can be detected and the user asked to re-import.
-BRIDGE_VERSION = 4
-_VERSION_RE = re.compile(r"applenotes-mcp bridge v(\d+)")
+BRIDGE_VERSION = 5
+# The stamp also records WHICH build is installed: "basic" (installable with a click, no
+# ticking or attachment sizes) or "full" (needs `wfimport`, does everything).
+_VERSION_RE = re.compile(r"applenotes-mcp bridge v(\d+) (basic|full)")
 SHORTCUTS_DB = Path.home() / "Library" / "Shortcuts" / "Shortcuts.sqlite"
 
 CONDITION_IS = 4  # WFCondition: equals
@@ -202,13 +204,87 @@ def _endif(group: str) -> dict:
     }
 
 
-def build_workflow() -> dict:
+def build_workflow(full: bool = False) -> dict:
+    """The bridge workflow. `full` adds the two actions macOS 27 will not import.
+
+    The BASIC build installs with a click in the Shortcuts app and is what everyone gets by
+    default. The FULL build additionally ticks checklist items and sets attachment display
+    sizes -- both still work perfectly at runtime -- but it can only be installed with the
+    `wfimport` helper, because the Shortcuts app refuses the workflow outright. See
+    "macOS 27 refuses to import two of the Notes actions" in NOTES.md.
+    """
     # The shortcut will fail to sign if UUIDs are not globally unique so we need a bunch
     u_input1, u_dict, u_title, u_blocks, \
     u_note, u_type, u_type_text, u_text, u_md_text, \
-    u_name, u_n, u_file, \
-    repeat_group, cl_group, file_group, md_group \
-        = (_uid() for _ in range(16))
+    u_name, u_n, u_file, u_add, u_item, u_size, u_size_text, u_checked, u_checked_text, \
+    repeat_group, cl_group, file_group, md_group, tick_group \
+        = (_uid() for _ in range(23))
+    size_groups = {s: _uid() for s in ("small", "medium", "large")}
+
+    # The two actions the Shortcuts app will not import. They RUN fine -- verified on
+    # macOS 27 -- so they are included when the workflow is destined for `wfimport`.
+    #
+    # Both are sequential Ifs rather than branches of the type test above: `checked` is
+    # only ever "yes" on a checklist block and `size` only ever set on a file block, so the
+    # entity each one targets (u_item, u_add) was produced earlier in this same iteration.
+    #
+    # "Set Checklist Items Checked" is NOT in the Shortcuts action library -- Apple hides
+    # it -- but it is flagged discoverable in Notes' intent metadata and resolves fine in a
+    # hand-built shortcut. It is the only way to write a ticked item, since Append Checklist
+    # Item has no `checked` parameter.
+    tick_actions = [
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+            "WFWorkflowActionParameters": {
+                "UUID": u_checked_text,
+                "WFTextActionText": _output_as_string(u_checked, "Dictionary Value"),
+            },
+        },
+        # The enum parameters below (`check`, and the sizes) are BARE strings, not string
+        # tokens. A WFTextTokenString leaves the parameter unresolved, and Shortcuts then
+        # stops mid-run to ask the user to pick a case -- which is invisible under
+        # `shortcuts run`, looks like a hang, and silently applies whatever they choose.
+        _if(tick_group, _uid(), "yes", _output(u_checked_text, "Text")),
+        {
+            "WFWorkflowActionIdentifier": "com.apple.Notes.SetChecklistItemCheckedLinkActionv2",
+            "WFWorkflowActionParameters": {
+                "UUID": _uid(),
+                "AppIntentDescriptor": _notes_intent("SetChecklistItemCheckedLinkActionv2"),
+                "changeOperation": "check",
+                "entities": _output(u_item, "Append Checklist Item"),
+                "note": _output(u_note, "Create Note"),
+            },
+        },
+        _endif(tick_group),
+    ]
+    # One If per size because the enum parameter takes a literal case, not a variable.
+    size_actions = [
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+            "WFWorkflowActionParameters": {
+                "UUID": u_size_text,
+                "WFTextActionText": _output_as_string(u_size, "Dictionary Value"),
+            },
+        },
+        *[
+            action
+            for size, group in size_groups.items()
+            for action in (
+                _if(group, _uid(), size, _output(u_size_text, "Text")),
+                {
+                    "WFWorkflowActionIdentifier": "com.apple.Notes.SetAttachmentSizeLinkAction",
+                    "WFWorkflowActionParameters": {
+                        "UUID": _uid(),
+                        "AppIntentDescriptor": _notes_intent("SetAttachmentSizeLinkAction"),
+                        "target": _output(u_add, "Add File to Note"),
+                        "attachmentSize": size,
+                    },
+                },
+                _endif(group),
+            )
+        ],
+    ]
+    extra = (tick_actions + size_actions) if full else []
 
     actions = [
         # A leading Comment stamping the version. It does nothing when the shortcut runs;
@@ -218,8 +294,10 @@ def build_workflow() -> dict:
             "WFWorkflowActionIdentifier": "is.workflow.actions.comment",
             "WFWorkflowActionParameters": {
                 "UUID": _uid(),
-                "WFCommentActionText": f"applenotes-mcp bridge v{BRIDGE_VERSION} "
-                "(generated -- do not edit)",
+                "WFCommentActionText": (
+                    f"applenotes-mcp bridge v{BRIDGE_VERSION} "
+                    f"{'full' if full else 'basic'} (generated -- do not edit)"
+                ),
             },
         },
         # The input is a LIST: item 1 is the JSON payload, items 2..N are attachment files.
@@ -257,6 +335,8 @@ def build_workflow() -> dict:
         _dict_value(_repeat_item(), u_text, "text"),
         _dict_value(_repeat_item(), u_name, "name"),
         _dict_value(_repeat_item(), u_n, "n"),
+        *([_dict_value(_repeat_item(), u_size, "size"),
+           _dict_value(_repeat_item(), u_checked, "checked")] if full else []),
         # A Dictionary Value is an untyped value, and the "is" comparison is not valid
         # against one -- Shortcuts shows the operator in red and the run fails with
         # "Please choose a value for each parameter". Passing it through a Text action
@@ -276,7 +356,7 @@ def build_workflow() -> dict:
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.CreateChecklistItemLinkAction",
             "WFWorkflowActionParameters": {
-                "UUID": _uid(),
+                "UUID": u_item,
                 "AppIntentDescriptor": _notes_intent("CreateChecklistItemLinkAction"),
                 "name": _output_as_string(u_text, "Dictionary Value"),
                 "noteEntity": _output(u_note, "Create Note"),
@@ -290,7 +370,7 @@ def build_workflow() -> dict:
         {
             "WFWorkflowActionIdentifier": "com.apple.Notes.AddFileAttachmentLinkAction",
             "WFWorkflowActionParameters": {
-                "UUID": _uid(),
+                "UUID": u_add,
                 "AppIntentDescriptor": _notes_intent("AddFileAttachmentLinkAction"),
                 "file": _output(u_file, "Item from List"),
                 "name": _output_as_string(u_name, "Dictionary Value"),
@@ -328,6 +408,7 @@ def build_workflow() -> dict:
             },
         },
         _endif(md_group),
+        *extra,
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.each",
             "WFWorkflowActionParameters": {
@@ -426,13 +507,15 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
     return blocks
 
 
-def losses(blocks: list[dict[str, str]]) -> list[str]:
-    """What this markdown asked for that macOS 27's Shortcuts can no longer write.
+def losses(blocks: list[dict[str, str]], full: bool | None = None) -> list[str]:
+    """What this markdown asked for that the INSTALLED bridge could not write.
 
-    Both causes are import-time refusals of a Notes intent, detailed in the module
-    docstring. The note is still written; these are the parts of it that will be wrong,
-    and the caller is expected to say so rather than let the note be quietly incorrect.
+    Empty for the full build, which writes everything. For the basic build these are the
+    parts of the note that will be wrong, and the caller is expected to say so rather than
+    let the note be quietly incorrect. `full` defaults to asking the installed shortcut.
     """
+    if installed_is_full() if full is None else full:
+        return []
     out: list[str] = []
     if any(b.get("checked") == "yes" for b in blocks):
         out.append(
@@ -447,13 +530,20 @@ def losses(blocks: list[dict[str, str]]) -> list[str]:
     return out
 
 
-def generate_signed_shortcut() -> Path:
+def generate_signed_shortcut(full: bool = False) -> Path:
+    """Write and sign a bridge shortcut, returning its path.
+
+    The full build is signed just the same -- signing validates nothing that the Shortcuts
+    app's import then rejects -- so the file is perfectly valid; it simply has to go in
+    through `wfimport` rather than a double-click. Both builds are written under the same
+    name, because only one can be installed at a time.
+    """
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
     unsigned = BRIDGE_DIR / "bridge-unsigned.shortcut"
     signed = BRIDGE_DIR / f"{SHORTCUT_NAME}.shortcut"
 
     with open(unsigned, "wb") as fh:
-        plistlib.dump(build_workflow(), fh)
+        plistlib.dump(build_workflow(full=full), fh)
 
     last = ""
     for attempt in range(1, SIGN_ATTEMPTS + 1):
@@ -474,6 +564,31 @@ def generate_signed_shortcut() -> Path:
 def is_installed() -> bool:
     result = subprocess.run(["shortcuts", "list"], capture_output=True, text=True)
     return SHORTCUT_NAME in result.stdout.splitlines()
+
+
+def _installed_actions() -> list[dict] | None:
+    """The installed bridge's action list, or None if it cannot be read."""
+    if not SHORTCUTS_DB.exists():
+        return None
+    try:
+        uri = f"file:{SHORTCUTS_DB.as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            row = conn.execute(
+                """
+                SELECT a.ZDATA FROM ZSHORTCUTACTIONS a
+                JOIN ZSHORTCUT s ON s.Z_PK = a.ZSHORTCUT
+                WHERE s.ZNAME = ?
+                """,
+                (SHORTCUT_NAME,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        return plistlib.load(io.BytesIO(bytes(row[0])))
+    except Exception:
+        return None
 
 
 def installed_version() -> int | None:
@@ -509,15 +624,37 @@ def installed_version() -> int | None:
     return _version_from_actions(actions)
 
 
-def _version_from_actions(actions: list[dict]) -> int:
-    """The version stamped in a workflow's Comment action, or 0 if there is no marker."""
+def installed_is_full() -> bool:
+    """Whether the INSTALLED bridge is the full build (ticking and attachment sizes).
+
+    False when it is the basic build, unstamped, or unreadable -- the conservative answer,
+    since it only ever causes a loss to be reported that did not happen, never the reverse.
+    """
+    actions = _installed_actions()
+    return _full_from_actions(actions) if actions else False
+
+
+def _stamp(actions: list[dict]) -> tuple[int, bool] | None:
+    """(version, is_full) from a workflow's Comment action, or None if unstamped."""
     for action in actions:
         if action.get("WFWorkflowActionIdentifier") == "is.workflow.actions.comment":
             text = action.get("WFWorkflowActionParameters", {}).get("WFCommentActionText", "")
             match = _VERSION_RE.search(text)
             if match:
-                return int(match.group(1))
-    return 0
+                return int(match.group(1)), match.group(2) == "full"
+    return None
+
+
+def _version_from_actions(actions: list[dict]) -> int:
+    """The version stamped in a workflow's Comment action, or 0 if there is no marker."""
+    stamp = _stamp(actions)
+    return stamp[0] if stamp else 0
+
+
+def _full_from_actions(actions: list[dict]) -> bool:
+    """Whether the stamped workflow is the full build. False when unstamped."""
+    stamp = _stamp(actions)
+    return bool(stamp and stamp[1])
 
 
 def _attachment_paths(blocks: list[dict[str, str]]) -> list[Path]:
@@ -549,7 +686,9 @@ def run(title: str, markdown: str, timeout: int = 120) -> None:
         raise BridgeError(
             f"the '{SHORTCUT_NAME}' shortcut is not installed. A signed copy has been "
             f"written to {path} -- open it and click 'Add Shortcut', then retry. "
-            "Shortcuts cannot be installed without this one-time confirmation."
+            "Shortcuts cannot be installed without this one-time confirmation. "
+            "(To also write ticked checkboxes and attachment sizes, install the full "
+            "build instead -- see 'Installing the full build' in the README.)"
         )
 
     # The installed shortcut may be an older build than this code expects (the user updated
@@ -557,12 +696,19 @@ def run(title: str, markdown: str, timeout: int = 120) -> None:
     # do NOT block on -- only a definite mismatch.
     version = installed_version()
     if version is not None and version != BRIDGE_VERSION:
-        path = generate_signed_shortcut()
+        # Regenerate the build that is already installed, so updating never silently
+        # downgrades someone from the full bridge to the basic one.
+        full = installed_is_full()
+        path = generate_signed_shortcut(full=full)
+        how = (
+            f"run `wfimport {path} ~/Library/Shortcuts/Shortcuts.sqlite`"
+            if full
+            else "open it and click 'Add Shortcut'"
+        )
         raise BridgeError(
             f"the installed '{SHORTCUT_NAME}' shortcut is out of date (v{version}, this "
             f"server needs v{BRIDGE_VERSION}). An updated signed copy is at {path} -- delete "
-            "the old shortcut in the Shortcuts app, open this one, click 'Add Shortcut', then "
-            "retry."
+            f"the old shortcut in the Shortcuts app, then {how}, then retry."
         )
 
     blocks = split_blocks(markdown)
