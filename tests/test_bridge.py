@@ -34,12 +34,20 @@ def texts(markdown: str) -> list[str]:
 # -- checklists ----------------------------------------------------------------------
 
 
-def test_checklist_items_become_their_own_blocks_carrying_ticked_state() -> None:
-    blocks = split_blocks("- [ ] todo\n- [x] done\n")
-    assert blocks == [
-        {"type": "checklist", "text": "todo", "checked": "no"},
+def test_only_ticked_items_become_their_own_blocks() -> None:
+    # An unticked box is something Notes' own parser writes correctly, so it stays in the
+    # prose chunk; splitting it out would cost an App Intent round trip for nothing.
+    assert split_blocks("- [ ] todo\n- [x] done\n") == [
+        {"type": "markdown", "text": "- [ ] todo"},
         {"type": "checklist", "text": "done", "checked": "yes"},
     ]
+
+
+def test_an_all_unticked_list_is_a_single_block() -> None:
+    # The case that matters for speed: a long shopping list is one append, not N.
+    blocks = split_blocks("- [ ] milk\n- [ ] eggs\n- [ ] bread\n")
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "markdown"
 
 
 def test_capital_X_ticks_too() -> None:
@@ -50,10 +58,14 @@ def test_asterisk_bullets_are_checklists_too() -> None:
     assert split_blocks("* [x] done\n")[0]["type"] == "checklist"
 
 
-def test_prose_around_a_checklist_is_split_so_ordering_is_preserved() -> None:
+def test_an_unticked_item_is_never_a_checklist_block() -> None:
+    assert [b["type"] for b in split_blocks("* [ ] todo\n")] == ["markdown"]
+
+
+def test_prose_around_a_ticked_item_is_split_so_ordering_is_preserved() -> None:
     # Checklist intents can only append, so the bridge must emit prose/checklist/prose as
-    # three ordered blocks; merging them would move the checklist to the end of the note.
-    assert kinds("before\n\n- [ ] item\n\nafter\n") == ["markdown", "checklist", "markdown"]
+    # three ordered blocks; merging them would move the item to the end of the note.
+    assert kinds("before\n\n- [x] item\n\nafter\n") == ["markdown", "checklist", "markdown"]
 
 
 def test_a_plain_bullet_is_not_a_checklist() -> None:
@@ -228,9 +240,18 @@ def test_headings_and_prose_stay_in_one_block() -> None:
 # tells us when the fix has landed rather than letting a stale xfail rot.
 
 
+def test_unticked_checklist_syntax_inside_a_code_fence_survives() -> None:
+    # Incidental, but real: now that `- [ ]` is left in the prose chunk, an example
+    # checkbox inside a fence is no longer torn out of it.
+    markdown = "```\n- [ ] example markdown, not a real checklist\n```\n"
+    assert kinds(markdown) == ["markdown"]
+
+
 @pytest.mark.xfail(strict=True, reason="split_blocks does not understand fenced code blocks")
-def test_checklist_syntax_inside_a_code_fence_is_not_a_checklist() -> None:
-    markdown = "```\n- [ ] this is example markdown, not a real checklist\n```\n"
+def test_ticked_checklist_syntax_inside_a_code_fence_is_not_a_checklist() -> None:
+    # Still broken, and still the same root cause: the line scan has no notion of fences,
+    # so a TICKED example inside one is hoisted out and becomes a real checklist item.
+    markdown = "```\n- [x] example markdown, not a real checklist\n```\n"
     assert kinds(markdown) == ["markdown"]
 
 

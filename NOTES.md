@@ -14,12 +14,25 @@ relevant Notes intent:
 
     Create Note (plain title)
     Repeat with each block:
-        checklist  → Append Checklist Item
-        file       → Add File to Note   (the file fetched by index from the inputs)
+        checklist  → Append Checklist Item  (+ Set Checklist Items Checked, full build)
+        file       → Add File to Note       (the file fetched by index from the inputs)
         otherwise  → Append to Note, with `interpretAsMarkdown` = true
 
 The note is built piecewise because checklists and attachments can only be *appended*: each
 part is handed to its intent in order.
+
+**Only what the parser cannot express is split out.** That means TICKED checklist items and
+file attachments, and nothing else. An unticked `- [ ]` is left in the prose chunk, because
+Notes' parser already makes a genuine checklist paragraph out of it, and every block costs
+an App Intent round trip — the slowest thing this server does. Measured on a 20-item list:
+one block and 2.1s when nothing is ticked, against twenty blocks and 6.4s when everything
+is. A ticked item in the middle of a list still splits it into three blocks, so the win is
+on lists that are mostly or entirely unticked, which is most of them.
+
+The obvious worry is the seam: items either side of a split are written by different
+intents, so they could come back as two lists, or out of order. They do not —
+`test_a_mixed_list_keeps_its_order_across_the_block_boundary` pins exactly that case
+live.
 
 **The markdown is parsed by Notes, not by Shortcuts.** `interpretAsMarkdown` is a parameter
 on the *Append to Note* intent (it appears in Notes' intent metadata as "Interpret as

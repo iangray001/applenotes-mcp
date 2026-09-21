@@ -181,6 +181,18 @@ def test_ticking_follows_the_installed_build(make_note) -> None:
     assert "- [ ] todo" in lines
 
 
+def test_a_mixed_list_keeps_its_order_across_the_block_boundary(make_note) -> None:
+    """The case split_blocks is riskiest on: unticked items ride in the prose chunk while
+    ticked ones are appended by intent, so this list is emitted as three separate blocks
+    (markdown / checklist / markdown). The items must still come back in document order,
+    as one continuous list, with the tick on the right one.
+    """
+    md = server.read_note(make_note("mixed-list", "- [ ] milk\n- [x] eggs\n- [ ] bread\n"))
+    items = [ln.strip() for ln in md.splitlines() if "]" in ln and ln.strip().startswith("-")]
+    ticked = "- [x] eggs" if bridge.installed_is_full() else "- [ ] eggs"
+    assert items == ["- [ ] milk", ticked, "- [ ] bread"], f"got: {md!r}"
+
+
 def test_a_ticked_item_is_reported_as_a_loss_only_on_the_basic_build(live_folder) -> None:
     out = server.create_note(
         title="tick-warning", markdown="- [x] done\n", folder=live_folder

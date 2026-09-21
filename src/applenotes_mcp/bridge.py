@@ -445,8 +445,15 @@ def build_workflow(full: bool = False) -> dict:
 def split_blocks(markdown: str) -> list[dict[str, str]]:
     """Split markdown into prose, checklist items, and file attachments, in order.
 
-    A `- [ ]` / `- [x]` line becomes its own checklist block, a whole-line reference to a
-    local file becomes a `file` block, and everything else accumulates into prose blocks.
+    A `- [x]` line becomes its own checklist block, a whole-line reference to a local file
+    becomes a `file` block, and everything else -- including `- [ ]` -- accumulates into
+    prose blocks.
+
+    Only TICKED items are split out. Notes' own markdown parser already turns `- [ ]` into
+    a genuine checklist paragraph, so routing it through Append Checklist Item buys nothing
+    and costs an App Intent round trip per item -- the slowest thing this server does. What
+    the parser cannot do is tick one, so `- [x]` still needs the intent, and still has to
+    be its own block because checklist items can only be appended, never inserted.
 
     Only those two need splitting out. Prose goes to Notes' own markdown parser, which
     handles a table, and a list directly after a table, and a single-dash delimiter row,
@@ -471,20 +478,12 @@ def split_blocks(markdown: str) -> list[dict[str, str]]:
 
     for line in markdown.splitlines():
         checklist = CHECKLIST_LINE.match(line)
+        ticked = bool(checklist) and checklist.group(1).lower() == "x"
         ref = None if checklist else file_ref(line)
 
-        if checklist:
+        if ticked:
             flush_prose()
-            state, text = checklist.groups()
-            blocks.append(
-                {
-                    "type": "checklist",
-                    "text": text,
-                    # Kept for the caller's benefit (see `losses`), not the shortcut's:
-                    # ticking needs SetChecklistItemChecked, which macOS 27 will not import.
-                    "checked": "yes" if state.lower() == "x" else "no",
-                }
-            )
+            blocks.append({"type": "checklist", "text": checklist.group(2), "checked": "yes"})
         elif ref:
             flush_prose()
             name, path, size = ref
